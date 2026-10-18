@@ -1,0 +1,9 @@
+build/
+dist/
+src/heatd
+src/digid
+*.o
+*.ko
+*.ko.zst
+.mod
+cscope.*
