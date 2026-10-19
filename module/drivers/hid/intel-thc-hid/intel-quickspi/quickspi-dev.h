@@ -83,10 +83,12 @@ enum quickspi_dev_state {
  * struct quickspi_driver_data - Driver specific data for quickspi device
  * @max_packet_size_value: identify max packet size, unit is 16 bytes
  * @spi_opcode_layout: layout of the THC SPI opcode registers
+ * @reset_on_resume: touch IC cannot be assumed to keep its state across suspend
  */
 struct quickspi_driver_data {
 	u32 max_packet_size_value;
 	enum thc_spi_opcode_layout spi_opcode_layout;
+	bool reset_on_resume;
 };
 
 struct device;

@@ -24,6 +24,7 @@
 struct quickspi_driver_data adl = {
 	.max_packet_size_value = MAX_PACKET_SIZE_VALUE_MTL,
 	.spi_opcode_layout = THC_SPI_OPCODE_LAYOUT_ADL,
+	.reset_on_resume = true,
 };
 
 struct quickspi_driver_data mtl = {
@@ -833,7 +834,7 @@ static int quickspi_resume(struct device *device)
 	 * plain HIDSPI_ON with nothing, and the descriptor read fails, so those
 	 * platforms have to re-enumerate unconditionally.
 	 */
-	if (device_may_wakeup(qsdev->dev)) {
+	if (device_may_wakeup(qsdev->dev) && !qsdev->driver_data->reset_on_resume) {
 		thc_interrupt_config(qsdev->thc_hw);
 
 		thc_interrupt_enable(qsdev->thc_hw, true);
