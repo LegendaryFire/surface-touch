@@ -440,3 +440,80 @@ int run_uhid_replay(const Options& opt, const Front& f) {
                p.count.frames, p.count.invalid, p.count.lost);
   return 0;
 }
+
+// ---- --script: the front fed from a scripted contact scenario ----
+//
+// One directive per line ('#' starts a comment):
+//   c [id,x,y ...]   send one 0x81 with these contacts (none = 0-count)
+//   r <n>            resend the previous contacts n more times
+//   g <ms>           send nothing for ms
+// Each frame sent is echoed to stdout as `s<idx> ts=<ts> id,x,y ...`.
+// Always gated on SIGUSR1; the front stays up until Ctrl-C.
+int run_script(const Options& opt, const Front& f) {
+  std::ifstream in(opt.script);
+  if (!in) {
+    std::fprintf(stderr, "heatd: cannot open script %s\n", opt.script);
+    return 2;
+  }
+  UhidOut uhid(f);
+  if (!uhid.open(opt, /*nonblock=*/true)) return 3;
+  std::fprintf(stderr, "heatd: uhid script front created from %s; Ctrl-C to destroy\n",
+               opt.script);
+  uhid.wait_for_go("scenario");
+
+  std::uint16_t ts = 1;
+  unsigned long sent = 0;
+  std::vector<heat::Contact> cur;
+  auto send = [&] {
+    uhid.send_0x81(ts, cur, /*button=*/false);
+    std::printf("s%lu ts=%u", ++sent, ts);
+    for (const auto& ct : cur) std::printf(" %u,%u,%u", ct.slot, ct.x, ct.y);
+    std::printf("\n");
+    std::fflush(stdout);
+    ++ts;
+    uhid.pump_for(8ms);
+  };
+  auto fail = [](long ln, const char* what, const std::string& tok) {
+    std::fprintf(stderr, "heatd: script:%ld: %s%s\n", ln, what, tok.c_str());
+    return 4;
+  };
+
+  std::string line;
+  long ln = 0;
+  while (!g_stop && std::getline(in, line)) {
+    ++ln;
+    if (const auto h = line.find('#'); h != std::string::npos) line.erase(h);
+    std::istringstream ls(line);
+    std::string dir;
+    if (!(ls >> dir)) continue;
+    if (dir == "c") {
+      cur.clear();
+      for (std::string tok; ls >> tok;) {
+        unsigned id = 0, x = 0, y = 0;
+        if (std::sscanf(tok.c_str(), "%u,%u,%u", &id, &x, &y) != 3)
+          return fail(ln, "bad contact '", tok + "'");
+        cur.push_back(heat::Contact{
+            .x = static_cast<std::uint16_t>(x), .y = static_cast<std::uint16_t>(y),
+            .slot = static_cast<std::uint8_t>(id), .confidence = true,
+            .in_contact = true});
+      }
+      send();
+    } else if (dir == "r") {
+      long n = 0;
+      if (!(ls >> n) || n < 0) return fail(ln, "bad repeat", "");
+      while (n-- > 0 && !g_stop) send();
+    } else if (dir == "g") {
+      long ms = 0;
+      if (!(ls >> ms) || ms < 0) return fail(ln, "bad gap", "");
+      uhid.pump_for(std::chrono::milliseconds(ms));
+    } else {
+      return fail(ln, "unknown directive '", dir + "'");
+    }
+  }
+  std::fprintf(stderr, "heatd: uhid script done frames=%lu; serving until Ctrl-C\n", sent);
+  while (!g_stop) {
+    uhid.pump_one();
+    std::this_thread::sleep_for(50ms);
+  }
+  return 0;
+}
