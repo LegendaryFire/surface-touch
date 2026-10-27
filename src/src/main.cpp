@@ -517,3 +517,210 @@ int run_script(const Options& opt, const Front& f) {
   }
   return 0;
 }
+
+// ---- --hidraw: the live pad ----
+
+// Reads the device's own calibration (feature report 0x06). Runs before the
+// stream is enabled, so the read cannot interleave with input reports.
+bool read_device_params(int hdev, heat::DeviceConfig* cfg) {
+  std::uint8_t buf[120] = {0x06};  // byte 0 selects the report
+  if (::ioctl(hdev, HIDIOCGFEATURE(sizeof(buf)), buf) < 0) {
+    std::fprintf(stderr, "heatd: GET_FEATURE 0x06: %s — keeping built-in\n",
+                 std::strerror(errno));
+    return false;
+  }
+  heat::DeviceParams dp;
+  std::string err;
+  if (!heat::decode_device_params(buf, sizeof buf, &dp, &err)) {
+    std::fprintf(stderr, "heatd: GET_FEATURE 0x06 decoded invalid: %s — "
+                         "keeping built-in\n", err.c_str());
+    return false;
+  }
+  *cfg = dp.to_config();
+  return true;
+}
+
+// Switches the pad from boot-mouse reports to the heat stream (feature 0x05
+// = 1). The mode is not kept across opens, so this runs on every start.
+bool enable_heat_stream(int hdev) {
+  std::uint8_t buf[2] = {0x05, 0x01};
+  if (::ioctl(hdev, HIDIOCSFEATURE(sizeof(buf)), buf) < 0) {
+    std::fprintf(stderr,
+                 "heatd: SET_FEATURE 0x05=1: %s — stream may stay in "
+                 "boot-mouse mode\n",
+                 std::strerror(errno));
+    return false;
+  }
+  return true;
+}
+
+// "pci-<bdf>/heatd", from the PCI function in the hidraw node's sysfs path.
+std::string phys_for(const char* hidraw) {
+  std::string base(hidraw);
+  base = base.substr(base.rfind('/') + 1);
+  const std::string link = "/sys/class/hidraw/" + base + "/device";
+  char resolved[PATH_MAX];
+  if (!::realpath(link.c_str(), resolved)) return {};
+  const std::string p(resolved);
+  const auto slash = p.find("/0000:");
+  if (slash == std::string::npos) return {};
+  const auto end = p.find('/', slash + 1);
+  return "pci-" + p.substr(slash + 1, end - slash - 1) + "/heatd";
+}
+
+int run_live(const Options& opt, const Front& f) {
+  const int hdev = ::open(opt.hidraw, O_RDWR | O_CLOEXEC);
+  if (hdev < 0) {
+    std::fprintf(stderr, "heatd: open %s: %s\n", opt.hidraw, std::strerror(errno));
+    return 2;
+  }
+  // Calibration: saved file, else the live 0x06 read, else the defaults.
+  heat::DeviceConfig cfg{};
+  const char* cfg_src = "built-in defaults";
+  if (opt.device_params) {
+    cfg = config_from_file(opt.device_params);
+    cfg_src = opt.device_params;
+  } else if (read_device_params(hdev, &cfg)) {
+    cfg_src = "live GET 0x06";
+  }
+  print_config(cfg, cfg_src);
+  enable_heat_stream(hdev);
+
+  UhidOut uhid(f);
+  if (!uhid.open(opt, /*nonblock=*/false, phys_for(opt.hidraw).c_str())) {
+    ::close(hdev);
+    return 3;
+  }
+
+  Pipeline p(make_engine(opt, cfg));
+  std::uint8_t buf[heat::kFrameSize];
+  unsigned long contacts_total = 0, sent = 0;
+  bool prev_nonempty = false;
+  auto print_counters = [&] {
+    const Counters& c = p.count;
+    std::fprintf(stderr,
+                 "heatd: frames=%lu invalid=%lu short=%lu lost=%lu "
+                 "contacts=%lu sent=%lu ",
+                 c.frames, c.invalid, c.short_reads, c.lost, contacts_total, sent);
+  };
+  // The 200 ms select timeout keeps the 2 s heartbeat going when the stream
+  // is dead.
+  auto next_beat = Clock::now();
+  while (!g_stop) {
+    fd_set rfds;
+    FD_ZERO(&rfds);
+    FD_SET(hdev, &rfds);
+    FD_SET(uhid.fd(), &rfds);
+    timeval tv{0, 200 * 1000};
+    const int r = ::select(std::max(hdev, uhid.fd()) + 1, &rfds, nullptr, nullptr, &tv);
+    if (r < 0) {
+      if (errno == EINTR) continue;
+      break;
+    }
+    if (Clock::now() >= next_beat) {
+      print_counters();
+      std::fprintf(stderr, "started=%d pressed=%lu\n", int(uhid.started()), p.count.btn);
+      next_beat += 2s;
+    }
+    if (FD_ISSET(uhid.fd(), &rfds) && !uhid.pump_one()) {
+      std::fprintf(stderr,
+                   "heatd: uhid front read hit EOF/error (%s) - the kernel "
+                   "removed or broke our device; exiting, counters below\n",
+                   std::strerror(errno));
+      break;
+    }
+    if (!FD_ISSET(hdev, &rfds)) continue;
+    const ssize_t got = ::read(hdev, buf, sizeof(buf));
+    if (got == 0) continue;
+    if (got < 0) {
+      if (errno == EINTR) continue;
+      std::fprintf(stderr, "heatd: hidraw read: %s\n", std::strerror(errno));
+      break;
+    }
+    if (static_cast<std::size_t>(got) < heat::kFrameSize) {
+      ++p.count.short_reads;
+      continue;
+    }
+    const auto contacts = p.step(buf, static_cast<std::size_t>(got));
+    if (!contacts) continue;
+    contacts_total += contacts->size();
+    if (emit(uhid, p.ts16, *contacts, p.button(), prev_nonempty)) ++sent;
+  }
+  uhid.close();
+  ::close(hdev);
+  print_counters();
+  std::fprintf(stderr, "last_fail=%d pressed=%lu\n", int(p.last_fail), p.count.btn);
+  return 0;
+}
+
+void usage(const char* argv0) {
+  std::printf(
+      "usage: %s --hidraw /dev/hidrawN | --replay FILE | --uhid-replay FILE |\n"
+      "          --script FILE | --print-descriptor  [options]\n"
+      "  --hidraw NODE        live: read the pad, serve the uhid front\n"
+      "  --replay FILE        offline decode of a capture (no devices touched)\n"
+      "  --trace              with --replay: print per-frame contacts and blobs\n"
+      "  --uhid-replay FILE   uhid front fed from a capture (pad untouched)\n"
+      "  --script FILE        uhid front fed from a scripted scenario (c/r/g)\n"
+      "  --gate               uhid modes: start the feed on SIGUSR1\n"
+      "                       (always on for --script)\n"
+      "  --engine heat|null   contact engine (default heat; null emits nothing)\n"
+      "  --device-params FILE saved 0x06 response to calibrate from (live mode\n"
+      "                       reads the device itself when absent)\n"
+      "  --vendor N, --product N  uhid front identity\n"
+      "  --print-descriptor   dump the uhid front descriptor, exit\n",
+      argv0);
+}
+
+}  // namespace
+
+int main(int argc, char** argv) {
+  Options opt;
+  auto value = [&](int& i) -> const char* {
+    if (i + 1 >= argc) {
+      std::fprintf(stderr, "heatd: %s needs a value\n", argv[i]);
+      std::exit(2);
+    }
+    return argv[++i];
+  };
+  auto number = [&](int& i) {
+    return static_cast<unsigned>(std::strtoul(value(i), nullptr, 0));
+  };
+  for (int i = 1; i < argc; ++i) {
+    const std::string_view a{argv[i]};
+    if (a == "--hidraw") opt.hidraw = value(i);
+    else if (a == "--replay") opt.replay = value(i);
+    else if (a == "--uhid-replay") opt.uhid_replay = value(i);
+    else if (a == "--script") opt.script = value(i);
+    else if (a == "--gate") opt.gate = true;
+    else if (a == "--engine") opt.engine = value(i);
+    else if (a == "--device-params") opt.device_params = value(i);
+    else if (a == "--vendor") opt.vendor = number(i);
+    else if (a == "--product") opt.product = number(i);
+    else if (a == "--print-descriptor") opt.print_descriptor = true;
+    else if (a == "--trace") opt.trace = true;
+    else if (a == "--help" || a == "-h") {
+      usage(argv[0]);
+      return 0;
+    } else {
+      std::fprintf(stderr, "heatd: unknown argument %s\n", argv[i]);
+      usage(argv[0]);
+      return 2;
+    }
+  }
+  if (opt.print_descriptor) {
+    std::fwrite(ptp::collection, 1, ptp::collection_size, stdout);
+    return 0;
+  }
+  const Front f = front_from_fixture();
+  if (opt.replay) return run_replay(opt, f);
+
+  std::signal(SIGINT, on_stop);
+  std::signal(SIGTERM, on_stop);
+  if (opt.uhid_replay) return run_uhid_replay(opt, f);
+  if (opt.script) return run_script(opt, f);
+  if (opt.hidraw) return run_live(opt, f);
+  std::fprintf(stderr, "heatd: nothing to do; try --help\n");
+  usage(argv[0]);
+  return 2;
+}
