@@ -1,0 +1,19 @@
+[Unit]
+Description=Surface touchpad heat processor (heatd)
+Documentation=file:@DOCDIR@/README.md
+# Triggered by udev (90-surface-touch.rules) when the touchpad's transport
+# device appears.
+# The unit carries no [Install] section: the device owns the lifecycle.
+# Unlimited restarts — no start rate limit.
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+ExecStart=@LIBEXECDIR@/surface-run-heatd
+# If the pad's hidraw node goes away, heatd exits and the restart
+# re-resolves the node.
+Restart=always
+RestartSec=2
+# Privileged HID feature-report writes (heat-stream mode select 0x05,
+# calibration fetch 0x06) go through hidraw ioctls, which require root.
+User=root
