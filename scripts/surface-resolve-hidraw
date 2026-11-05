@@ -1,0 +1,38 @@
+#!/bin/sh
+# surface-resolve-hidraw — find the /dev/hidrawN node of a HID device by
+# identity, never by node number.
+#
+# hidraw numbers are assigned at enumeration and differ between boots, so
+# everything in this package resolves the node from the device's own HID
+# modalias (vendor:product) at each start, and nothing caches /dev/hidrawN.
+#
+# usage: surface-resolve-hidraw VID PID [TIMEOUT_S]
+#   e.g.   surface-resolve-hidraw 045e 0c46 15   (the touchpad)
+#          surface-resolve-hidraw 045e 0c5d 15   (the digitizer)
+#   prints /dev/hidrawN on stdout when found (waiting up to TIMEOUT_S for
+#   the node to appear — the driver probes asynchronously); exit 1 on
+#   timeout.
+
+set -eu
+
+VID=${1:?usage: surface-resolve-hidraw VID PID [TIMEOUT_S]}
+PID=${2:?usage: surface-resolve-hidraw VID PID [TIMEOUT_S]}
+TIMEOUT=${3:-0}
+
+# hid modalias format, e.g. hid:b0001g0004v0000045Ep00000C46
+WANT=$(printf 'v%08Xp%08X' "0x${VID}" "0x${PID}")
+
+tries=0
+while :; do
+	for m in /sys/class/hidraw/hidraw*/device/modalias; do
+		[ -r "$m" ] || continue
+		if grep -q "$WANT" "$m" 2>/dev/null; then
+			d=${m%/device/modalias}
+			echo "/dev/${d##*/}"
+			exit 0
+		fi
+	done
+	[ "$tries" -ge "$TIMEOUT" ] && exit 1
+	tries=$((tries + 1))
+	sleep 1
+done
