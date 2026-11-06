@@ -1,0 +1,27 @@
+# SPDX-License-Identifier: MIT
+
+post_upgrade() {
+	post_install "$@"
+}
+
+post_install() {
+	# Register and build the DKMS module for every installed kernel the
+	# headers allow, then let udev/systemd pick up the new rules and units.
+	dkms add -m surface-thc-hid -v 1.0.0 || return 1
+	dkms install -m surface-thc-hid -v 1.0.0 || return 1
+	systemctl daemon-reload
+	udevadm control --reload-rules
+	udevadm trigger --subsystem-match=hid --action=add
+}
+
+pre_upgrade() {
+	dkms remove -m surface-thc-hid -v "${1% *}" --all 2>/dev/null || true
+}
+
+pre_remove() {
+	dkms remove -m surface-thc-hid -v 1.0.0 --all || true
+	systemctl daemon-reload
+	udevadm control --reload-rules
+	echo "surface-touch removed. Reboot to return the touch hardware to the"
+	echo "plain kernel state; the devices come back driver-unclaimed."
+}
