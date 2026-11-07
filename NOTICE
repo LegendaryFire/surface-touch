@@ -1,0 +1,77 @@
+# NOTICE — provenance of everything in this package
+
+## module/ — the kernel driver
+
+`module/drivers/hid/intel-thc-hid` is the upstream Linux
+`drivers/hid/intel-thc-hid` driver (7.3-rc generation sources, Intel
+copyright headers intact, GPL-2.0-only) carrying the following changes, all
+of them required for the Alder/Raptor Lake-L THC SPI ports:
+
+1. **PCI IDs** for the ADL family SPI ports added to `quickspi_pci_tbl`:
+   `8086:7AD8/7AD9` (ADL-S), `8086:51D0/51D1` (ADL-P — the Surface Laptop
+   Studio 2), `8086:54D0/54D1` (ADL-M).
+2. **ADL SPI opcode register layout** (`thc_spi_set_opcode_layout` /
+   `thc_spi_encode_opcode`): this generation consumes the SPI opcodes
+   differently from Meteor Lake — the opcode is replicated across the
+   register's byte lanes, the DMA-read opcode register is skipped, and the
+   write opcode is programmed to a different register (`0x1018`).
+3. **`reset_on_resume`** driver data with the resume path resetting the
+   touch controller on ADL platforms: on the Surface Laptop Studio 2 the
+   firmware asserts the panel reset line from ACPI `_PS3` across suspend, so
+   the controller comes back reset and must be re-initialised, not merely
+   context-restored. The HID devices and their hidraw nodes persist across
+   the reset; the controller returns in its default report mode.
+4. **ACPI-first probe order**: ADL uses the same PCI IDs for HIDSPI and
+   legacy mode, so the `_DSM` query runs before any hardware reconfiguration
+   and a non-HIDSPI port fails probe cleanly.
+5. **Interrupt completion re-check** (`thc_interrupt_finish`): THC interrupts
+   are edge-triggered on the cause registers, so a cause latched while the
+   handler runs raises no interrupt of its own; the handler now unmasks and
+   re-checks before returning.
+6. Small hardening/observability changes threaded through the tree (error
+   logging on threaded-IRQ failure, initialised `*read_len` on an empty DMA
+   ring).
+7. **Forward-ported from upstream 7.3 final**: the output-report buffer is
+   sized with `HIDSPI_OUTPUT_REPORT_SIZE()` and oversized reports are
+   rejected in `write_cmd_to_txdma()` (upstream fix for the report-header
+   overrun; three hunks, byte-identical to upstream).
+
+**Where this tree comes from.** Items 1–6 are the source of the DKMS tree
+`/usr/src/intel-thc-hid-0.1` on the reference Surface Laptop Studio 2 (Arch
+Linux), a pre-existing community DKMS package whose author is not recorded.
+That tree was built and installed with DKMS and validated on this machine
+(touchpad, digitizer touch and pen). Item 7 is the upstream 7.3 fix
+applied on top; the reference machine's installed DKMS tree does not
+carry it yet.
+
+**What is *not* claimed.** The ADL-S and ADL-M IDs (items 1) have not been
+tested on any machine — they ship because the validated tree carries them;
+expect the untested ones to behave the same, do not rely on it. Likewise the
+`intel-quicki2c` module has no device on the Surface Laptop Studio 2: it is
+built only to keep the three-module set at one consistent base (DKMS replaces
+the in-tree modules by name). No proprietary code is included or
+required.
+
+## src/ — heatd and digid
+
+Written for this project (MIT). The pad front's uhid descriptor is a
+byte-exact collection of the device's own report descriptor
+(`fixtures/ptp_collection_000D_0005.bin`, sha-pinned); the digitiser touch
+front is the standard Windows 8 MT-class Touch Screen collection bound to
+this device's geometry (its 0x06 response); the pen front keeps the
+device's own pen collection verbatim.
+
+`heatd-sources.sha256` pins the touchpad engine sources to the
+hardware-validated revision; `make digid` refuses to link if they drift.
+
+The processors link OpenCV (Apache-2.0) dynamically, for the segmentation
+stage only (connected components and moments); no OpenCV sources are
+bundled.
+
+## udev rules, systemd units, scripts
+
+Written for this project (MIT). They match the hardware by firmware-reported
+identity only — never by hidraw number, which is assigned at enumeration and
+can differ between boots. No component here assumes `iptsd`, `ithc`, or any other stack is
+present or absent beyond the documented conflicts in README.md.
+
