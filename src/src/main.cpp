@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: MIT
 // heatd — touch processor for the Surface Laptop Studio 2 pad.
 //
-// Reads heat frames from the pad's hidraw node (or a capture), runs the
-// contact engine, and presents the contacts as a PTP touchpad over uhid,
-// using a collection of the device's own report descriptor.
+// Reads heat frames from the pad's hidraw node, runs the contact engine,
+// and presents the contacts as a PTP touchpad over uhid, using a collection
+// of the device's own report descriptor.
 #include <fcntl.h>
 #include <linux/hidraw.h>
 #include <linux/uhid.h>
@@ -26,10 +26,8 @@
 #include <map>
 #include <memory>
 #include <optional>
-#include <sstream>
 #include <string>
 #include <string_view>
-#include <thread>
 #include <vector>
 
 #include "descwalk.hpp"
@@ -47,14 +45,9 @@ using Clock = std::chrono::steady_clock;
 
 struct Options {
   const char* hidraw = nullptr;
-  const char* replay = nullptr;
-  const char* uhid_replay = nullptr;
-  const char* script = nullptr;
   const char* device_params = nullptr;  // saved 0x06 response
   const char* engine = "heat";
   bool print_descriptor = false;
-  bool trace = false;
-  bool gate = false;
   // Microsoft vendor id with a product id distinct from the physical pad's
   // 0x0C46, so the front never shadows it.
   unsigned vendor = 0x045E;
@@ -62,9 +55,7 @@ struct Options {
 };
 
 volatile sig_atomic_t g_stop = 0;
-volatile sig_atomic_t g_go = 0;
 void on_stop(int) { g_stop = 1; }
-void on_go(int) { g_go = 1; }
 
 // ---- front: report sizes derived from the descriptor fixture ----
 
@@ -123,18 +114,6 @@ void print_config(const heat::DeviceConfig& c, const char* source) {
                c.baseline, c.spawn_gate, source);
 }
 
-// Calibration for modes without a device: --device-params or the defaults.
-heat::DeviceConfig offline_config(const Options& opt) {
-  if (opt.device_params) {
-    auto c = config_from_file(opt.device_params);
-    print_config(c, opt.device_params);
-    return c;
-  }
-  heat::DeviceConfig c{};
-  print_config(c, "built-in defaults");
-  return c;
-}
-
 std::unique_ptr<heat::Engine> make_engine(const Options& opt,
                                           const heat::DeviceConfig& cfg) {
   const std::string_view e{opt.engine};
@@ -144,7 +123,7 @@ std::unique_ptr<heat::Engine> make_engine(const Options& opt,
   std::exit(2);
 }
 
-// ---- per-frame pipeline shared by every mode ----
+// ---- per-frame pipeline ----
 
 struct Counters {
   unsigned long frames = 0;
@@ -185,7 +164,6 @@ class Pipeline {
   }
 
   bool button() const { return engine_->button(); }
-  const heat::HeatEngine* heat() const { return heat_; }
 
   Counters count;
   heat::Fail last_fail = heat::Fail::None;
@@ -204,8 +182,8 @@ class UhidOut {
   explicit UhidOut(const Front& f) : front_(f) {}
   ~UhidOut() { close(); }
 
-  bool open(const Options& opt, bool nonblock, const char* phys = "") {
-    fd_ = ::open("/dev/uhid", (nonblock ? O_NONBLOCK : 0) | O_RDWR | O_CLOEXEC);
+  bool open(const Options& opt, const char* phys) {
+    fd_ = ::open("/dev/uhid", O_RDWR | O_CLOEXEC);
     if (fd_ < 0) {
       std::fprintf(stderr, "heatd: open /dev/uhid: %s\n", std::strerror(errno));
       return false;
@@ -304,26 +282,6 @@ class UhidOut {
     return true;
   }
 
-  // Keeps the front serviced for d.
-  void pump_for(Clock::duration d) {
-    const auto until = Clock::now() + d;
-    while (!g_stop && Clock::now() < until) {
-      pump_one();
-      std::this_thread::sleep_for(5ms);
-    }
-  }
-
-  // Keeps the front serviced until SIGUSR1 or a stop signal.
-  void wait_for_go(const char* what) {
-    std::signal(SIGUSR1, on_go);
-    std::fprintf(stderr, "heatd: armed; send SIGUSR1 (pid %d) to start %s\n",
-                 static_cast<int>(getpid()), what);
-    while (!g_stop && !g_go) {
-      pump_one();
-      std::this_thread::sleep_for(5ms);
-    }
-  }
-
   bool started() const { return started_; }
   int fd() const { return fd_; }
 
@@ -344,178 +302,6 @@ bool emit(UhidOut& uhid, std::uint16_t ts, const std::vector<heat::Contact>& con
     sent = uhid.send_0x81(ts, contacts, button);
   prev_nonempty = !contacts.empty();
   return sent;
-}
-
-// ---- --replay: offline decode ----
-
-void print_trace(const Pipeline& p, const std::vector<heat::Contact>& contacts) {
-  std::printf("f%-6lu ts=%-6u", p.count.frames, p.ts16);
-  const heat::HeatEngine* he = p.heat();
-  if (he) std::printf(" k=%zu b=%zu", std::size_t(he->region_count()), he->last_blobs().size());
-  for (const auto& ct : contacts)
-    std::printf("  (%u,%u)#%u%s", ct.x, ct.y, ct.slot, ct.in_contact ? "" : "r");
-  if (he)
-    for (const auto& bl : he->last_blobs())
-      std::printf("  [%u,%u,m%u,n%u]", unsigned(bl.cx + 0.5), unsigned(bl.cy + 0.5),
-                  bl.min_cell, bl.cells_on);
-  std::printf("\n");
-}
-
-int run_replay(const Options& opt, const Front& f) {
-  std::ifstream in(opt.replay, std::ios::binary);
-  if (!in) {
-    std::fprintf(stderr, "heatd: cannot open %s\n", opt.replay);
-    return 2;
-  }
-  Pipeline p(make_engine(opt, offline_config(opt)));
-  std::vector<std::uint8_t> buf(heat::kFrameSize);
-  unsigned long contact_frames = 0;
-  while (in) {
-    in.read(reinterpret_cast<char*>(buf.data()), heat::kFrameSize);
-    const auto got = static_cast<std::size_t>(in.gcount());
-    if (got == 0) break;
-    if (got < heat::kFrameSize) {
-      ++p.count.short_reads;
-      continue;
-    }
-    const auto contacts = p.step(buf.data(), got);
-    if (!contacts) {
-      std::fprintf(stderr, "frame %lu: invalid (reason %d)\n",
-                   p.count.frames + p.count.invalid, static_cast<int>(p.last_fail));
-      continue;
-    }
-    if (opt.trace) print_trace(p, *contacts);
-    if (!contacts->empty()) ++contact_frames;
-  }
-  const Counters& c = p.count;
-  std::printf(
-      "replay %s: frames=%lu invalid=%lu short=%lu lost=%lu contact_frames=%lu (0x81 payload %u B,"
-      " contact_max=%u) pressed=%lu\n",
-      opt.replay, c.frames, c.invalid, c.short_reads, c.lost, contact_frames,
-      f.input_0x81_bytes, f.contact_max, c.btn);
-  return c.frames > 0 ? 0 : 1;
-}
-
-// ---- --uhid-replay: the front fed from a capture at 8 ms cadence ----
-
-int run_uhid_replay(const Options& opt, const Front& f) {
-  std::ifstream in(opt.uhid_replay, std::ios::binary);
-  if (!in) {
-    std::fprintf(stderr, "heatd: cannot open %s\n", opt.uhid_replay);
-    return 2;
-  }
-  UhidOut uhid(f);
-  if (!uhid.open(opt, /*nonblock=*/true)) return 3;
-  std::fprintf(stderr, "heatd: uhid front created; feed %s then inspect, "
-                       "Ctrl-C to destroy\n", opt.uhid_replay);
-  if (opt.gate) uhid.wait_for_go("feed");
-
-  Pipeline p(make_engine(opt, offline_config(opt)));
-  std::uint8_t buf[heat::kFrameSize];
-  bool prev_nonempty = false, eof = false;
-  auto next = Clock::now(), last_beat = Clock::now();
-  while (!g_stop) {
-    uhid.pump_one();
-    if (Clock::now() - last_beat > 2s) {
-      std::fprintf(stderr, "alive frames=%lu invalid=%lu\n", p.count.frames,
-                   p.count.invalid);
-      last_beat = Clock::now();
-    }
-    if (eof) {
-      std::this_thread::sleep_for(50ms);
-      continue;
-    }
-    in.read(reinterpret_cast<char*>(buf), heat::kFrameSize);
-    if (static_cast<std::size_t>(in.gcount()) != heat::kFrameSize) {
-      eof = true;  // keep serving the front until Ctrl-C
-      continue;
-    }
-    const auto contacts = p.step(buf, sizeof(buf));
-    if (!contacts) continue;
-    emit(uhid, p.ts16, *contacts, p.button(), prev_nonempty);
-    next = std::max(next, Clock::now()) + 8ms;
-    std::this_thread::sleep_until(next);
-  }
-  std::fprintf(stderr, "heatd: uhid-replay exit frames=%lu invalid=%lu lost=%lu\n",
-               p.count.frames, p.count.invalid, p.count.lost);
-  return 0;
-}
-
-// ---- --script: the front fed from a scripted contact scenario ----
-//
-// One directive per line ('#' starts a comment):
-//   c [id,x,y ...]   send one 0x81 with these contacts (none = 0-count)
-//   r <n>            resend the previous contacts n more times
-//   g <ms>           send nothing for ms
-// Each frame sent is echoed to stdout as `s<idx> ts=<ts> id,x,y ...`.
-// Always gated on SIGUSR1; the front stays up until Ctrl-C.
-int run_script(const Options& opt, const Front& f) {
-  std::ifstream in(opt.script);
-  if (!in) {
-    std::fprintf(stderr, "heatd: cannot open script %s\n", opt.script);
-    return 2;
-  }
-  UhidOut uhid(f);
-  if (!uhid.open(opt, /*nonblock=*/true)) return 3;
-  std::fprintf(stderr, "heatd: uhid script front created from %s; Ctrl-C to destroy\n",
-               opt.script);
-  uhid.wait_for_go("scenario");
-
-  std::uint16_t ts = 1;
-  unsigned long sent = 0;
-  std::vector<heat::Contact> cur;
-  auto send = [&] {
-    uhid.send_0x81(ts, cur, /*button=*/false);
-    std::printf("s%lu ts=%u", ++sent, ts);
-    for (const auto& ct : cur) std::printf(" %u,%u,%u", ct.slot, ct.x, ct.y);
-    std::printf("\n");
-    std::fflush(stdout);
-    ++ts;
-    uhid.pump_for(8ms);
-  };
-  auto fail = [](long ln, const char* what, const std::string& tok) {
-    std::fprintf(stderr, "heatd: script:%ld: %s%s\n", ln, what, tok.c_str());
-    return 4;
-  };
-
-  std::string line;
-  long ln = 0;
-  while (!g_stop && std::getline(in, line)) {
-    ++ln;
-    if (const auto h = line.find('#'); h != std::string::npos) line.erase(h);
-    std::istringstream ls(line);
-    std::string dir;
-    if (!(ls >> dir)) continue;
-    if (dir == "c") {
-      cur.clear();
-      for (std::string tok; ls >> tok;) {
-        unsigned id = 0, x = 0, y = 0;
-        if (std::sscanf(tok.c_str(), "%u,%u,%u", &id, &x, &y) != 3)
-          return fail(ln, "bad contact '", tok + "'");
-        cur.push_back(heat::Contact{
-            .x = static_cast<std::uint16_t>(x), .y = static_cast<std::uint16_t>(y),
-            .slot = static_cast<std::uint8_t>(id), .confidence = true,
-            .in_contact = true});
-      }
-      send();
-    } else if (dir == "r") {
-      long n = 0;
-      if (!(ls >> n) || n < 0) return fail(ln, "bad repeat", "");
-      while (n-- > 0 && !g_stop) send();
-    } else if (dir == "g") {
-      long ms = 0;
-      if (!(ls >> ms) || ms < 0) return fail(ln, "bad gap", "");
-      uhid.pump_for(std::chrono::milliseconds(ms));
-    } else {
-      return fail(ln, "unknown directive '", dir + "'");
-    }
-  }
-  std::fprintf(stderr, "heatd: uhid script done frames=%lu; serving until Ctrl-C\n", sent);
-  while (!g_stop) {
-    uhid.pump_one();
-    std::this_thread::sleep_for(50ms);
-  }
-  return 0;
 }
 
 // ---- --hidraw: the live pad ----
@@ -631,7 +417,7 @@ int run_live(const Options& opt, const Front& f) {
   StreamGuard guard{hdev};
 
   UhidOut uhid(f);
-  if (!uhid.open(opt, /*nonblock=*/false, phys_for(opt.hidraw).c_str())) {
+  if (!uhid.open(opt, phys_for(opt.hidraw).c_str())) {
     ::close(hdev);
     return 3;
   }
@@ -701,18 +487,11 @@ int run_live(const Options& opt, const Front& f) {
 
 void usage(const char* argv0) {
   std::printf(
-      "usage: %s --hidraw /dev/hidrawN | --replay FILE | --uhid-replay FILE |\n"
-      "          --script FILE | --print-descriptor  [options]\n"
-      "  --hidraw NODE        live: read the pad, serve the uhid front\n"
-      "  --replay FILE        offline decode of a capture (no devices touched)\n"
-      "  --trace              with --replay: print per-frame contacts and blobs\n"
-      "  --uhid-replay FILE   uhid front fed from a capture (pad untouched)\n"
-      "  --script FILE        uhid front fed from a scripted scenario (c/r/g)\n"
-      "  --gate               uhid modes: start the feed on SIGUSR1\n"
-      "                       (always on for --script)\n"
+      "usage: %s --hidraw /dev/hidrawN | --print-descriptor  [options]\n"
+      "  --hidraw NODE        read the pad, serve the uhid front\n"
       "  --engine heat|null   contact engine (default heat; null emits nothing)\n"
-      "  --device-params FILE saved 0x06 response to calibrate from (live mode\n"
-      "                       reads the device itself when absent)\n"
+      "  --device-params FILE saved 0x06 response to calibrate from (read from\n"
+      "                       the device itself when absent)\n"
       "  --vendor N, --product N  uhid front identity\n"
       "  --print-descriptor   dump the uhid front descriptor, exit\n",
       argv0);
@@ -735,16 +514,11 @@ int main(int argc, char** argv) {
   for (int i = 1; i < argc; ++i) {
     const std::string_view a{argv[i]};
     if (a == "--hidraw") opt.hidraw = value(i);
-    else if (a == "--replay") opt.replay = value(i);
-    else if (a == "--uhid-replay") opt.uhid_replay = value(i);
-    else if (a == "--script") opt.script = value(i);
-    else if (a == "--gate") opt.gate = true;
     else if (a == "--engine") opt.engine = value(i);
     else if (a == "--device-params") opt.device_params = value(i);
     else if (a == "--vendor") opt.vendor = number(i);
     else if (a == "--product") opt.product = number(i);
     else if (a == "--print-descriptor") opt.print_descriptor = true;
-    else if (a == "--trace") opt.trace = true;
     else if (a == "--help" || a == "-h") {
       usage(argv[0]);
       return 0;
@@ -759,12 +533,8 @@ int main(int argc, char** argv) {
     return 0;
   }
   const Front f = front_from_fixture();
-  if (opt.replay) return run_replay(opt, f);
-
   std::signal(SIGINT, on_stop);
   std::signal(SIGTERM, on_stop);
-  if (opt.uhid_replay) return run_uhid_replay(opt, f);
-  if (opt.script) return run_script(opt, f);
   if (opt.hidraw) return run_live(opt, f);
   std::fprintf(stderr, "heatd: nothing to do; try --help\n");
   usage(argv[0]);

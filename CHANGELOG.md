@@ -9,6 +9,12 @@
   `heatd` now re-selects the heat stream once per detected suspend, and on a
   report that is not a heat frame (a device-initiated reset).
 
+### Removed
+- The developer modes of `heatd` (`--replay`, `--uhid-replay`, `--script`,
+  `--trace`, `--gate`) and `digid` (`--replay`, `--uhid-replay`,
+  `--trace-pen`, `--gate`, `--rate`). The services never used them.
+  `digid --live --record FILE` still saves a session.
+
 ### Changed
 - Documentation: resume resets the touch controllers but keeps the HID
   devices and their hidraw nodes; the earlier text said the nodes are

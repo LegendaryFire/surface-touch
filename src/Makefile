@@ -61,9 +61,9 @@ heatd: $(OBJ)
 
 # Every header src/digi/*.cpp includes is listed: an edited header must
 # never leave digid on a pre-edit object.
-DIGI_DEPS := include/digi_frame.hpp include/digi_pipeline.hpp include/digi_replay.hpp \
+DIGI_DEPS := include/digi_frame.hpp include/digi_pipeline.hpp \
              include/digi_uhid.hpp include/pen_frame.hpp include/pen_feed.hpp \
-             include/pen_uhid.hpp include/pen_replay.hpp include/pen_pressure.hpp \
+             include/pen_uhid.hpp include/pen_pressure.hpp \
              include/pen_position.hpp \
              include/touch_tracker.hpp
 $(BUILD)/digi/digid.o: $(DIGI_DEPS)

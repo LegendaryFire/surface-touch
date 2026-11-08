@@ -60,11 +60,6 @@ class DigiEngine final {
   // process() call.
   std::vector<Contact> drain_releases() { return std::exchange(releases_, {}); }
 
-  // Engine state, for inspection.
-  const std::vector<Blob>& last_blobs() const { return tracker_.blobs(); }
-  int region_count() const { return tracker_.region_count(); }
-  const std::vector<Track>& last_tracks() const { return tracker_.tracks(); }
-
  private:
   Contact to_contact(double x, double y, std::uint8_t wire, bool in_contact) const;
 

@@ -1,28 +1,13 @@
 // SPDX-License-Identifier: MIT
 // digid — Surface digitizer processor.
 //
-// --replay and --uhid-replay read captures only and never open the device;
-// the uhid front is a host-side virtual device. --live arms the port with
-// SET_FEATURE [05 01] and reverts it at teardown.
-//
 // Usage:
-//   ./digid --replay FILE.binl [--verbose]
-//   ./digid --trace-pen FILE.binl
-//     per-frame pen CSV trace: the normal decode with a measurement sink;
-//     prints only.
-//     tallies + live-track histogram; --verbose per-frame track positions.
-//   ./digid --uhid-replay FILE.binl [--gate] [--rate HZ]
-//     feed the capture to the uhid fronts (MT 'Surface Digitizer Touch' for the
-//     0x1A containers, pen 'Surface Digitizer Pen' for the pen-family frames)
-//     at capture cadence (or capped by --rate: a replay is a
-//     real event source for the desktop); --gate waits for SIGUSR1 before
-//     frame 1. Stays alive after the feed for inspection; Ctrl-C exits and
-//     destroys the fronts.
 //   sudo ./digid --live [--bdf 0000:00:10.6] [--verbose] [--record FILE.binl]
 //     GET 0x05 -> SET [05 01] -> stream 0x1A containers into the engine and
-//     the uhid MT front, pen-family frames into the pen feed and the uhid
-//     pen front -> SET [05 00] at teardown (Ctrl-C). --record writes
-//     every report read to FILE.binl, replayable with --replay.
+//     the uhid MT front ('Surface Digitizer Touch'), pen-family frames into the
+//     pen feed and the uhid pen front ('Surface Digitizer Pen') -> SET [05 00]
+//     at teardown (Ctrl-C). The fronts are host-side virtual devices.
+//     --record writes every report read to FILE.binl, for a bug report.
 #include <cerrno>
 #include <csignal>
 #include <cstdio>
@@ -37,90 +22,37 @@
 #include <linux/uhid.h>
 #include <map>
 #include <string>
+#include <vector>
 #include <sys/ioctl.h>
 #include <unistd.h>
 
 #include "digi_frame.hpp"
 #include "digi_pipeline.hpp"
-#include "digi_replay.hpp"
 #include "digi_uhid.hpp"
 #include "pen_feed.hpp"
-#include "pen_replay.hpp"
 
 namespace {
 
-using digi::append_releases;
-using digi::Stats;
-
 volatile sig_atomic_t g_stop = 0;
-volatile sig_atomic_t g_go = 0;
 void on_sigint(int) { g_stop = 1; }
-void on_sigusr1(int) { g_go = 1; }
 
-int replay(const char* path, bool verbose) {
-  Stats st;
-  digi::DigiEngine eng;
-  const long n = digi::for_each_record(
-      path, [&](std::uint64_t, const std::uint8_t* buf, std::uint32_t len) {
-        ++st.records;
-        if (len != digi::kWireSize || buf[0] != digi::kReportId) {
-          ++st.other_id;  // not a 0x1A container: counted, not decoded
-          return;
-        }
-        ++st.containers;
-        digi::Fail why = digi::Fail::None;
-        const auto f = digi::parse_container(buf, len, &why);
-        if (!f) {
-          ++st.parse_fail;  // a bad container rejects the whole frame
-          return;
-        }
-        if (!f->matrix) {
-          ++st.scene;  // scene frames carry no cell grid
-          if (verbose) std::printf("scene ts16=%5u\n", f->ts16);
-          return;
-        }
-        ++st.matrix;
-        auto contacts = eng.process(f->cells);
-        ++st.live_hist[contacts.size()];  // live contacts, before releases
-        append_releases(eng, contacts, st.releases);
-        if (verbose) {
-          std::printf("matrix ts16=%5u tracks=%zu", f->ts16, contacts.size());
-          for (const auto& c : contacts)
-            std::printf(" [%u](%u,%u)%s%s", c.slot, c.x, c.y,
-                        c.in_contact ? "" : "/rel",
-                        c.confidence ? "" : "?");
-          std::printf("\n");
-        }
-      });
-  if (n < 0) {
-    std::fprintf(stderr, "digid: cannot read %s\n", path);
-    return 2;
+// Session counters, printed at teardown. The live-track histogram counts
+// active tracks before the release-append.
+struct Stats {
+  long records = 0, containers = 0, matrix = 0, scene = 0;
+  long parse_fail = 0, releases = 0;
+  std::map<unsigned, unsigned> live_hist;  // concurrent tracks -> frames
+};
+
+// As in heatd: releases ride the same report as the actives, capped by the
+// array size.
+void append_releases(digi::DigiEngine& eng, std::vector<digi::Contact>& contacts,
+                     long& release_count) {
+  for (auto& r : eng.drain_releases()) {
+    ++release_count;
+    if (contacts.size() < static_cast<std::size_t>(digi::uhid::kFrontContacts))
+      contacts.push_back(r);
   }
-  std::printf(
-      "digid replay : %s\nrecords=%ld containers(0x1A)=%ld matrix=%ld "
-      "scene=%ld other-id=%ld parse_fail=%ld releases=%ld\n",
-      path, st.records, st.containers, st.matrix, st.scene, st.other_id,
-      st.parse_fail, st.releases);
-  for (const auto& [live, frames] : st.live_hist)
-    std::printf("  matrix frames with %u live track(s): %u\n", live, frames);
-  // Pen-family pass over the same file, through the single-defined shape in
-  // pen_replay.hpp.
-  const pen::Stats ps = pen::replay_file(path);
-  auto cons = [&](unsigned m) {
-    auto it = ps.released.find(m);
-    return it == ps.released.end() ? 0L : it->second;
-  };
-  std::printf(
-      "pen replay    : frames=%ld walk-ok=%ld 0x2E-out=%ld walk-fail=%ld "
-      "pen=%ld one=%ld fit=%ld cycle=%ld/%ld scene=%ld/%ld ticks=%ld "
-      "rejected=%ld stops=%ld consumed={%ld,%ld,%ld,%ld,%ld,%ld} "
-      "pos=%ld/%ld/%ld\n",
-      ps.frames, ps.walk_ok, ps.out_grammar, ps.walk_fail, ps.pen_reports,
-      ps.one_record, ps.mode_fit, ps.cycle_ok, ps.cycle_steps, ps.scene_pen,
-      ps.scene_records, ps.ticks, ps.rejected, ps.held_incomplete, cons(6),
-      cons(7), cons(8), cons(9), cons(10), cons(11), ps.pos.n, ps.pos.none,
-      ps.pos.agree);
-  return 0;
 }
 
 // ---- uhid front (host-side virtual device) ----------------------------------
@@ -150,9 +82,8 @@ constexpr FrontSpec kPenSpec{digi::penhid::kName,    digi::penhid::kVendor,
 class UhidFront {
  public:
   // phys is copied into the HID device's phys string ("pci-<bdf>/digid"
-  // for the live touch front, "pci-<bdf>/digid-pen" for the live pen
-  // front, empty for replay fronts).
-  bool open_front(const char* phys = "", const FrontSpec& spec = kTouchSpec) {
+  // for the touch front, "pci-<bdf>/digid-pen" for the pen front).
+  bool open_front(const char* phys, const FrontSpec& spec = kTouchSpec) {
     spec_ = &spec;
     fd_ = ::open("/dev/uhid", O_RDWR | O_NONBLOCK);
     if (fd_ < 0) {
@@ -251,108 +182,6 @@ class UhidFront {
 // feed), 0x2E is the out-of-grammar 16 B frame.
 inline bool is_pen_frame(std::uint8_t id) {
   return id == 0x07 || id == 0x0B || id == 0x0C || id == 0x0D;
-}
-
-int uhid_replay(const char* path, bool gate, double rate_hz) {
-  // Rate cap on INPUT2 writes (--rate HZ, 0 = capture cadence): a replay is
-  // a REAL event source for the desktop (libinput maps both fronts), and
-  // full-cadence pen floods are hostile to tablet-protocol consumers. This
-  // paces the
-  // STREAM; it never changes what is decoded or sent.
-  const long min_gap_us =
-      rate_hz > 0.0 ? static_cast<long>(1e6 / rate_hz) : 0;
-  auto throttle = [&](std::uint64_t& last) {
-    if (!min_gap_us) return;
-    timespec ts{};
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    std::uint64_t now =
-        std::uint64_t(ts.tv_sec) * 1000000u + ts.tv_nsec / 1000u;
-    if (last != 0 && now > last && now - last < std::uint64_t(min_gap_us)) {
-      const timespec s{0, long(min_gap_us - (now - last)) * 1000};
-      nanosleep(&s, nullptr);
-      now = last + std::uint64_t(min_gap_us);
-    }
-    last = now;
-  };
-  std::uint64_t last_pen_us = 0, last_mt_us = 0;
-  UhidFront front, pfront;
-  if (!front.open_front()) return 2;
-  if (!pfront.open_front("", kPenSpec)) return 2;
-  std::printf("digid: uhid fronts '%s' (0x045E:0x%04X) + '%s' "
-              "(0x045E:0x%04X) created — verifying binding while feeding %s\n",
-              digi::uhid::kName, digi::uhid::kProduct, digi::penhid::kName,
-              digi::penhid::kProduct, path);
-  // Wait up to 2 s for the kernel to bind and send START.
-  for (int i = 0; i < 200 && !(front.started() && pfront.started()); ++i) {
-    front.pump();
-    pfront.pump();
-    usleep(10000);
-  }
-  if (gate) {
-    std::printf("digid: --gate — feed armed, send SIGUSR1 to start\n");
-    while (!g_go && !g_stop) { front.pump(); pfront.pump(); usleep(10000); }
-  }
-  long releases = 0, sent = 0, pen_sent = 0;
-  digi::DigiEngine eng;
-  pen::Assembler pasm;
-  pen::feed::PenFeed pfeed;
-  std::uint64_t prev_mono = 0;
-  bool have_prev = false;
-  std::uint8_t payload[digi::uhid::kInputPayloadBytes];
-  std::uint8_t ppayload[digi::penhid::kInputPayloadBytes];
-  const long n = digi::for_each_record(
-      path, [&](std::uint64_t mono, const std::uint8_t* buf, std::uint32_t len) {
-        if (g_stop) return;
-        // Replay at capture cadence, capping gaps at 100 ms, on every frame
-        // of either family.
-        if (have_prev && mono > prev_mono) {
-          std::uint64_t us = mono - prev_mono;
-          if (us > 100000) us = 100000;
-          const timespec ts{0, static_cast<long>(us) * 1000};
-          nanosleep(&ts, nullptr);
-        }
-        if (len != digi::kWireSize || buf[0] != digi::kReportId) {
-          if (!is_pen_frame(buf[0])) return;
-          prev_mono = mono;
-          have_prev = true;
-          const auto pf = pasm.decode(buf, len);
-          if (pf.fail != pen::Fail::None) return;
-          if (pfeed.update(pf)) {  // one report per full-profile frame
-            digi::penhid::pack_report_0x01(ppayload, pfeed.report);
-            throttle(last_pen_us);
-            if (pfront.send_input(digi::penhid::kReportInput, ppayload,
-                                  sizeof(ppayload)))
-              ++pen_sent;
-          }
-          front.pump();
-          pfront.pump();
-          return;
-        }
-        prev_mono = mono;
-        have_prev = true;
-        digi::Fail why = digi::Fail::None;
-        const auto f = digi::parse_container(buf, len, &why);
-        if (!f || !f->matrix) return;  // scene frames produce no touch reports
-        auto contacts = eng.process(f->cells);
-        append_releases(eng, contacts, releases);
-        digi::uhid::pack_report_0x0C(payload, sizeof(payload), f->ts16,
-                                     contacts);
-        throttle(last_mt_us);
-        if (front.send_input(digi::uhid::kReportInput, payload,
-                             sizeof(payload)))
-          ++sent;
-        front.pump();
-        pfront.pump();
-      });
-  if (n < 0) {
-    std::fprintf(stderr, "digid: cannot read %s\n", path);
-    return 2;
-  }
-  std::printf("digid: feed done (mt-reports=%ld releases=%ld pen-reports=%ld)"
-              ". Inspect the fronts (driver bind, /dev/input nodes); Ctrl-C "
-              "to destroy.\n", sent, releases, pen_sent);
-  while (!g_stop) { front.pump(); pfront.pump(); usleep(50000); }
-  return 0;
 }
 
 // ---- live mode ---------------------------------------------------------------
@@ -587,96 +416,29 @@ int live(const char* bdf, bool verbose, const char* record_path) {
 
 }  // namespace
 
-// Per-frame CSV trace through the same decode the replay and the live path
-// run (pen::replay_file with the sink).
-// Measurement only — it ships no policy and never opens the device.
-// Columns: us, rid, ts16(-1 none), have57, haveprof, half, pm(profile_mean),
-// colsum, rowsum, cx/cy (the profile centroid, pen_position.hpp; -1 no full
-// profile this frame), p2c/p2r (the controller's refined cell, 255 invalid),
-// class5 (0x07 frame byte +5 raw; recorded, unused), ncon (released
-// sub-frames), zc/zr (1 = that axis carries no signal, so its cx/cy is not a
-// measurement; -1 = no full profile this frame), route + fcx/fcy (the
-// SHIPPED feed's decision: which of the centroid / refined-cell / hold routes
-// update() took, and the cell it chose BEFORE the map's clamp. Runs a real
-// PenFeed alongside the decode:
-// same header, same predicate, no copy).
-int trace_pen(const char* path) {
-  std::printf("us,rid,ts16,have57,haveprof,half,pm,colsum,rowsum,cx,cy,p2c,"
-              "p2r,class5,ncon,zc,zer,route,fcx,fcy\n");
-  long frames = 0;
-  pen::feed::PenFeed feed;  // the shipped judge, driven frame-for-frame
-  const std::function<void(std::uint64_t, const std::uint8_t*, std::uint32_t,
-                           const pen::Frame&)> sink =
-      [&](std::uint64_t us, const std::uint8_t* b, std::uint32_t,
-          const pen::Frame& f) {
-        ++frames;
-        feed.update(f);  // judgement only: this tool never emits a report
-        const pen::Profile& p = f.profile;
-        const bool full = f.have_profile && p.full();
-        const pen::PenPosition pos = full ? pen::locate_pen(p) : pen::PenPosition{};
-        unsigned long cs = 0, rs = 0;
-        for (const std::uint32_t v : p.col) cs += v;
-        for (const std::uint32_t v : p.row) rs += v;
-        std::printf(
-            "%llu,0x%02X,%d,%d,%d,%d,%llu,%lu,%lu,%.4f,%.4f,%u,%u,%d,%zu,%d,"
-            "%d,%c,%.4f,%.4f\n",
-            (unsigned long long)us, b[0], f.have_pen_state ? int(f.pen_timestamp & 0xFFFF) : -1,
-            int(f.have_pen_state), int(f.have_profile), int(p.half),
-            (unsigned long long)pen::feed::profile_mean(p), cs, rs,
-            full ? pos.col.cell : -1.0,
-            full ? pos.row.cell : -1.0,
-            p.refined_col, p.refined_row,
-            b[0] == 0x07 ? int(b[5]) : -1, f.released.size(),
-            full ? int(!pos.col.valid) : -1,
-            full ? int(!pos.row.valid) : -1,
-            feed.route, feed.cell_x, feed.cell_y);
-      };
-  const pen::Stats ps = pen::replay_file(path, &sink);
-  if (ps.frames == 0) {
-    std::fprintf(stderr, "digid: cannot read %s\n", path);
-    return 2;
-  }
-  std::fprintf(stderr, "digid: trace-pen %s: %ld frames\n", path, frames);
-  return 0;
-}
-
 int main(int argc, char** argv) {
-  const char* replay_path = nullptr;
-  const char* uhid_path = nullptr;
   const char* bdf = kBdfDefault;
   const char* record_path = nullptr;
-  const char* trace_path = nullptr;
-  bool verbose = false, gate = false, live_mode = false;
-  double rate = 0.0;  // --rate HZ: uhid-replay INPUT2 cap (0 = capture cadence)
+  bool verbose = false, live_mode = false;
   for (int i = 1; i < argc; ++i) {
-    if (!std::strcmp(argv[i], "--replay") && i + 1 < argc) replay_path = argv[++i];
-    else if (!std::strcmp(argv[i], "--trace-pen") && i + 1 < argc)
-      trace_path = argv[++i];
-    else if (!std::strcmp(argv[i], "--uhid-replay") && i + 1 < argc)
-      uhid_path = argv[++i];
-    else if (!std::strcmp(argv[i], "--rate") && i + 1 < argc)
-      rate = std::atof(argv[++i]);
-    else if (!std::strcmp(argv[i], "--live")) live_mode = true;
+    if (!std::strcmp(argv[i], "--live")) live_mode = true;
     else if (!std::strcmp(argv[i], "--bdf") && i + 1 < argc) bdf = argv[++i];
     else if (!std::strcmp(argv[i], "--record") && i + 1 < argc) record_path = argv[++i];
     else if (!std::strcmp(argv[i], "--verbose") || !std::strcmp(argv[i], "-v"))
       verbose = true;
-    else if (!std::strcmp(argv[i], "--gate")) gate = true;
     else {
-      std::fprintf(stderr,
-                   "usage: digid --replay FILE.binl [--verbose]\n"
-                   "       digid --trace-pen FILE.binl\n"
-                   "       digid --uhid-replay FILE.binl [--gate] [--rate HZ]\n"
-                   "       digid --live [--bdf BDF] [--verbose] [--record FILE.binl]\n"
-                   "  --live arms the digitizer port (SET_FEATURE [05 01]) and\n"
-                   "   reverts it at teardown; --uhid-replay and --live carry\n"
-                   "   both fronts ('Surface Digitizer Touch' + 'Surface Digitizer\n"
-                   "   Pen'); --rate caps the replay INPUT2\n"
-                   "   rate (a replay is a real desktop event source);\n"
-                   "   the modes above run off captures\n"
-                   "   only and never open the device.\n");
-      return 2;
+      live_mode = false;
+      break;
     }
+  }
+  if (!live_mode) {
+    std::fprintf(stderr,
+                 "usage: digid --live [--bdf BDF] [--verbose] [--record FILE.binl]\n"
+                 "  arms the digitizer port (SET_FEATURE [05 01]), serves the\n"
+                 "  'Surface Digitizer Touch' and 'Surface Digitizer Pen' fronts, and\n"
+                 "  reverts the port at teardown. --record saves every report\n"
+                 "  read, for a bug report.\n");
+    return 2;
   }
   std::signal(SIGINT, on_sigint);
   std::signal(SIGTERM, on_sigint);
@@ -684,11 +446,7 @@ int main(int argc, char** argv) {
   // Closing the node does not: a digid killed by SIGHUP without a handler
   // left the port armed, with the firmware stream off and no client alive.
   std::signal(SIGHUP, on_sigint);
-  std::signal(SIGUSR1, on_sigusr1);
-  if (live_mode) return live(bdf, verbose, record_path);
-  if (trace_path) return trace_pen(trace_path);
-  if (uhid_path) return uhid_replay(uhid_path, gate, rate);
-  if (replay_path) return replay(replay_path, verbose);
-  std::fprintf(stderr, "digid: one of --replay/--uhid-replay/--live required\n");
-  return 2;
+  // SIGUSR1 has no use here; ignore it rather than die with the port armed.
+  std::signal(SIGUSR1, SIG_IGN);
+  return live(bdf, verbose, record_path);
 }

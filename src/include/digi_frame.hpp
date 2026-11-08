@@ -4,9 +4,7 @@
 
 #include <cstddef>
 #include <cstdint>
-#include <cstdio>
 #include <optional>
-#include <vector>
 
 namespace digi {
 
@@ -86,31 +84,6 @@ inline std::optional<Frame> parse_container(const std::uint8_t* buf,
   return Frame{le16(buf + kOffTs16), matrix, sec,
                matrix ? buf + kOffCells : nullptr, buf + kOffTail,
                buf[kOffStateA], buf[kOffStateB]};
-}
-
-// Capture record framing (.binl): u64 mono_us, u32 len, bytes.
-// Calls fn(mono_us, payload, len) for every record of a .binl file.
-// Returns record count, or -1 on read failure.
-template <class Fn>
-inline long for_each_record(const char* path, Fn&& fn) {
-  std::FILE* f = std::fopen(path, "rb");
-  if (!f) return -1;
-  long count = 0;
-  std::uint8_t hdr[12];
-  std::vector<std::uint8_t> buf;
-  while (std::fread(hdr, 1, 12, f) == 12) {
-    const std::uint64_t mono = std::uint64_t(le32(hdr)) |
-        (std::uint64_t(le32(hdr + 4)) << 32);
-    const std::uint32_t len = le32(hdr + 8);
-    if (len > 65536) break;  // corrupt-stream guard; the buffer is
-                             // per-record
-    buf.resize(len);
-    if (std::fread(buf.data(), 1, len, f) != len) break;
-    fn(mono, buf.data(), len);
-    ++count;
-  }
-  std::fclose(f);
-  return count;
 }
 
 }  // namespace digi

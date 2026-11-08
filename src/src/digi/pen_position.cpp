@@ -2,7 +2,6 @@
 #include "pen_position.hpp"
 
 #include <cmath>
-#include <cstdlib>
 #include <opencv2/core.hpp>
 #include <opencv2/geometry.hpp>
 #include <opencv2/imgproc.hpp>
@@ -50,12 +49,6 @@ PenPosition locate_pen(const Profile& p) {
   pos.col = locate_on_axis(p.col);
   pos.row = locate_on_axis(p.row);
   return pos;
-}
-
-bool agrees_with_refined_cell(const PenPosition& pos, const Profile& p) {
-  return pos.valid() &&
-         std::abs(std::lround(pos.col.cell) - long(p.refined_col)) <= 1 &&
-         std::abs(std::lround(pos.row.cell) - long(p.refined_row)) <= 1;
 }
 
 }  // namespace pen

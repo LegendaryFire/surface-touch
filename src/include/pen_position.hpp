@@ -45,8 +45,4 @@ AxisPosition locate_on_axis(const std::vector<std::uint32_t>& profile);
 // Both axes of a full profile; invalid for a half-length one.
 PenPosition locate_pen(const Profile& p);
 
-// Whether both rounded coordinates fall within one cell of the controller's
-// own refined cell (a consistency check for replay tallies).
-bool agrees_with_refined_cell(const PenPosition& pos, const Profile& p);
-
 }  // namespace pen
