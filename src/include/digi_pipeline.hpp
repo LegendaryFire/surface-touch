@@ -30,6 +30,9 @@ struct DeviceConfig {
   std::uint8_t spawn_gate = 100;  // ON cells at or below this are cores
   std::uint8_t core_join = 120;   // cores joined through cells <= this are
                                   // one contact
+  // Palm rejection threshold, ON area per core (touch::SensorConfig).
+  // Palms are reported with Confidence = 0.
+  double palm_mm2_per_core = 700.0;
 };
 
 using Blob = touch::Blob;
@@ -53,15 +56,17 @@ class DigiEngine final {
   explicit DigiEngine(DeviceConfig cfg = {});
 
   // One matrix frame in, live contact set out (may be empty). Scene frames
-  // carry no cell grid and are not passed here.
-  std::vector<Contact> process(const std::uint8_t* cells);
+  // carry no cell grid and are not passed here. While pen_near is set, every
+  // touch is a palm: the hand resting on the screen while the pen writes.
+  std::vector<Contact> process(const std::uint8_t* cells, bool pen_near = false);
 
   // One Contact{slot, in_contact=false} per track retired by the last
   // process() call.
   std::vector<Contact> drain_releases() { return std::exchange(releases_, {}); }
 
  private:
-  Contact to_contact(double x, double y, std::uint8_t wire, bool in_contact) const;
+  Contact to_contact(double x, double y, std::uint8_t wire, bool palm,
+                     bool in_contact) const;
 
   DeviceConfig cfg_;
   touch::ContactTracker tracker_;

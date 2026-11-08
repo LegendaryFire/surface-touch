@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+### Added
+- Palm rejection on the touchpad and the touchscreen. A touched region whose
+  area per contact core reaches 700 mm2 is a palm; fingers held together stay
+  fingers because each brings its own core. Palms are reported with
+  Confidence = 0, which the kernel passes on as a palm tool, so libinput
+  ignores them instead of seeing a lift or a tap. A contact stays a palm
+  until it lifts.
+- Touchscreen: while the pen is in range, and for 0.5 s after, every touch is
+  a palm (the writing hand resting on the screen).
+
 ### Fixed
 - The touchpad was often dead after waking from suspend: the driver resets
   the controller on resume, which drops it out of the heat stream, and

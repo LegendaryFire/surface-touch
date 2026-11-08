@@ -9,6 +9,7 @@
 //     at teardown (Ctrl-C). The fronts are host-side virtual devices.
 //     --record writes every report read to FILE.binl, for a bug report.
 #include <cerrno>
+#include <chrono>
 #include <csignal>
 #include <cstdio>
 #include <cstdlib>
@@ -184,6 +185,23 @@ inline bool is_pen_frame(std::uint8_t id) {
   return id == 0x07 || id == 0x0B || id == 0x0C || id == 0x0D;
 }
 
+// Pen-in-range touch suppression: while the pen is in range, and for a short
+// hold after it leaves, every touch is a palm - the writing hand resting on
+// the screen. The pen may report its last in-range frame and then fall
+// silent, so the hold runs from the last in-range report.
+class PenProximity {
+ public:
+  void update(bool in_range) {
+    if (in_range) last_in_range_ = Clock::now();
+  }
+  bool near() const { return Clock::now() - last_in_range_ < kHold; }
+
+ private:
+  using Clock = std::chrono::steady_clock;
+  static constexpr auto kHold = std::chrono::milliseconds(500);
+  Clock::time_point last_in_range_ = Clock::now() - kHold;
+};
+
 // ---- live mode ---------------------------------------------------------------
 // One fd for the whole session:
 //   resolve node -> GET 0x05 -> SET [05 01] -> stream -> SET [05 00] -> close
@@ -328,6 +346,7 @@ int live(const char* bdf, bool verbose, const char* record_path) {
   digi::DigiEngine eng;
   pen::Assembler pasm;
   pen::feed::PenFeed pfeed;
+  PenProximity pen_proximity;
   std::uint8_t buf[8192];  // larger than every declared report (max 7488 B)
   long sent = 0, pen_frames = 0, pen_sent = 0;
   bool first_frame_logged = false;
@@ -351,7 +370,7 @@ int live(const char* bdf, bool verbose, const char* record_path) {
           ++st.scene;
         } else {
           ++st.matrix;
-          auto contacts = eng.process(f->cells);
+          auto contacts = eng.process(f->cells, pen_proximity.near());
           ++st.live_hist[contacts.size()];
           append_releases(eng, contacts, st.releases);
           std::uint8_t payload[digi::uhid::kInputPayloadBytes];
@@ -370,6 +389,7 @@ int live(const char* bdf, bool verbose, const char* record_path) {
         if (pf.fail != pen::Fail::None) {
           ++st.parse_fail;  // same counter: a frame that will not walk
         } else if (pfeed.update(pf)) {
+          pen_proximity.update(pfeed.report.in_range);
           std::uint8_t ppayload[digi::penhid::kInputPayloadBytes];
           digi::penhid::pack_report_0x01(ppayload, pfeed.report);
           if (pfront.send_input(digi::penhid::kReportInput, ppayload,

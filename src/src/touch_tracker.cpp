@@ -142,6 +142,12 @@ void ContactTracker::segment(const std::uint8_t* cells) {
   const cv::Mat onMap(R, C, CV_8UC1, on_.data());
   const cv::Mat cellsMap(R, C, CV_8UC1, const_cast<std::uint8_t*>(cells));
 
+  // ON regions, labelled 1..n, with their areas and bounding boxes.
+  cv::Mat regionLab, regionStats, regionCentroids;
+  const int nRegion = cv::connectedComponentsWithStats(onMap, regionLab, regionStats,
+                                                      regionCentroids, 4, CV_32S) - 1;
+  const int* regionp = regionLab.ptr<int>(0);
+
   // Seeds, relabelled 1..nCore in scan order.
   cv::Mat lab;
   const cv::Mat joinMap = onMap & (cellsMap <= cfg_.core_join);
@@ -181,6 +187,7 @@ void ContactTracker::segment(const std::uint8_t* cells) {
     double m00 = 0, m10 = 0, m01 = 0, m20 = 0, m02 = 0, m11 = 0;
     int n = 0;
     std::uint8_t lo = 255;
+    int region = -1;
   };
   std::vector<Acc> acc{std::size_t(nCore)};
   for (int i = 0; i < N; ++i) {
@@ -198,6 +205,7 @@ void ContactTracker::segment(const std::uint8_t* cells) {
     a.m11 += w * x * y;
     a.n++;
     a.lo = std::min(a.lo, v);
+    a.region = regionp[i] - 1;
   }
 
   // Centroid and equivalent ellipse from the second central moments.
@@ -213,6 +221,7 @@ void ContactTracker::segment(const std::uint8_t* cells) {
     b.m11 = a.m11;
     b.cells_on = a.n;
     b.min_cell = a.lo;
+    b.region = a.region;
     const double inv = 1.0 / a.m00;
     b.cx = a.m10 * inv;
     b.cy = a.m01 * inv;
@@ -230,8 +239,26 @@ void ContactTracker::segment(const std::uint8_t* cells) {
     blobs_.push_back(b);
   }
 
-  cv::Mat regionLab;
-  regions_ = cv::connectedComponents(onMap, regionLab, 4) - 1;
+  classify_regions(regionStats, nRegion);
+}
+
+// Region sizes, core counts and the palm decision; each blob inherits its
+// region's decision.
+void ContactTracker::classify_regions(const cv::Mat& stats, int count) {
+  const double cell_mm2 = (cfg_.him_w / 100.0 / cfg_.cols) * (cfg_.him_h / 100.0 / cfg_.rows);
+  regions_.assign(std::size_t(count), Region{});
+  for (int k = 0; k < count; ++k) {
+    Region& g = regions_[std::size_t(k)];
+    g.cells = stats.at<int>(k + 1, cv::CC_STAT_AREA);  // label 0 is the background
+    g.width = stats.at<int>(k + 1, cv::CC_STAT_WIDTH);
+    g.height = stats.at<int>(k + 1, cv::CC_STAT_HEIGHT);
+    g.area_mm2 = g.cells * cell_mm2;
+  }
+  for (const Blob& b : blobs_) ++regions_[std::size_t(b.region)].cores;
+  for (Region& g : regions_)
+    g.palm = cfg_.palm_mm2_per_core > 0 && g.cores > 0 &&
+             g.area_mm2 / g.cores >= cfg_.palm_mm2_per_core;
+  for (Blob& b : blobs_) b.palm = regions_[std::size_t(b.region)].palm;
 }
 
 // A coasting track has lifted when the strongest cell in the 3x3 under both
@@ -312,6 +339,7 @@ void ContactTracker::track(const std::uint8_t* cells) {
       tr.x = tr.kx.p;
       tr.y = tr.ky.p;
       tr.miss = 0;
+      tr.palm = tr.palm || blobs_[std::size_t(i)].palm;
       blob_matched[std::size_t(i)] = 1;
     } else if (++tr.miss >= kDropFrames || lifted(tr, cells)) {
       tr.alive = false;
@@ -322,7 +350,7 @@ void ContactTracker::track(const std::uint8_t* cells) {
   }
 
   for (const auto& tr : tracks_)
-    if (!tr.alive) retired_.push_back(Retired{tr.x, tr.y, tr.wire});
+    if (!tr.alive) retired_.push_back(Retired{tr.x, tr.y, tr.wire, tr.palm});
   tracks_.erase(std::remove_if(tracks_.begin(), tracks_.end(),
                                [](const Track& t) { return !t.alive; }),
                 tracks_.end());
@@ -337,12 +365,17 @@ void ContactTracker::track(const std::uint8_t* cells) {
     tr.x = pos[std::size_t(i)].x;
     tr.y = pos[std::size_t(i)].y;
     tr.alive = true;
+    tr.palm = blobs_[std::size_t(i)].palm;
     kf_init(tr.kx, tr.x, r, pv0);
     kf_init(tr.ky, tr.y, r, pv0);
     tracks_.push_back(tr);
   }
 
   for (const Retired& d : retired_) release_wire(d.wire);
+}
+
+void ContactTracker::mark_all_palm() {
+  for (Track& tr : tracks_) tr.palm = true;
 }
 
 // Smallest free id at spawn, released at retirement.

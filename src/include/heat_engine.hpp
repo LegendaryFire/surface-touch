@@ -51,6 +51,9 @@ struct DeviceConfig {
   // miss count; the hysteresis layer does not hold contacts alive below the
   // touch level.
   std::uint8_t spawn_gate = 100;  // core edge: cell <= gate is a core
+  // Palm rejection threshold, ON area per core (touch::SensorConfig).
+  // Palms are reported with Confidence = 0.
+  double palm_mm2_per_core = 700.0;
 };
 
 using Blob = touch::Blob;

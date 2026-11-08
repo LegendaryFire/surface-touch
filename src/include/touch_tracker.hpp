@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: MIT
 // Contact pipeline shared by the pad (heatd) and the digitizer (digid):
-// per-cell hysteresis, core-seeded blob segmentation, and Kalman/Hungarian
-// tracking with a fixed pool of wire ids.
+// per-cell hysteresis, core-seeded blob segmentation, palm classification,
+// and Kalman/Hungarian tracking with a fixed pool of wire ids.
 #pragma once
 
 #include <cstdint>
 #include <vector>
+
+namespace cv { class Mat; }
 
 namespace touch {
 
@@ -22,6 +24,21 @@ struct SensorConfig {
   std::uint8_t spawn_gate = 0;  // ON cells at or below this are cores
   std::uint8_t core_join = 0;   // cores connected through cells at or below
                                 // this are one seed (>= spawn_gate)
+  // Palm rejection: a region whose ON area per core reaches this is a palm.
+  // Fingers held together share a region but bring a core each, so their
+  // area per core stays fingertip-sized; a palm spreads few cores over a
+  // large area. 0 disables.
+  double palm_mm2_per_core = 0;
+};
+
+// One 4-connected area of ON cells. Blobs grow inside regions, so every blob
+// belongs to exactly one.
+struct Region {
+  int cells = 0;
+  int width = 0, height = 0;  // bounding box, cells
+  int cores = 0;              // blobs grown in this region
+  double area_mm2 = 0;
+  bool palm = false;
 };
 
 // One segmented blob: weighted raw moments and the equivalent ellipse.
@@ -38,6 +55,8 @@ struct Blob {
   int orient_cdeg = 0;                // orientation, hundredths of a degree
   int ext_a = 0, ext_b = 0;           // full axis lengths, cells (rounded)
   int cells_on = 0;                   // cells in the blob
+  int region = -1;                    // index into ContactTracker::regions()
+  bool palm = false;                  // its region is a palm
 };
 
 // One axis of a constant-velocity Kalman filter: state [p v], measurement p,
@@ -56,6 +75,7 @@ struct Track {
   int miss = 0;             // frames since the last match
   bool alive = false;
   std::uint8_t wire = 0xFF;  // contact id on the wire, fixed for life
+  bool palm = false;         // once set, kept until the track retires
   KalmanAxis kx, ky;
 };
 
@@ -63,6 +83,7 @@ struct Track {
 struct Retired {
   double x = 0, y = 0;
   std::uint8_t wire = 0;
+  bool palm = false;
 };
 
 class ContactTracker {
@@ -73,13 +94,19 @@ class ContactTracker {
   void process(const std::uint8_t* cells);
 
   const std::vector<Blob>& blobs() const { return blobs_; }
-  int region_count() const { return regions_; }  // ON-map components
+  const std::vector<Region>& regions() const { return regions_; }
+  int region_count() const { return int(regions_.size()); }
   const std::vector<Track>& tracks() const { return tracks_; }
   const std::vector<Retired>& retired() const { return retired_; }
+
+  // Marks every live track a palm; like a region-based palm, it stays one
+  // until the track retires.
+  void mark_all_palm();
 
  private:
   void threshold(const std::uint8_t* cells);
   void segment(const std::uint8_t* cells);
+  void classify_regions(const cv::Mat& stats, int count);
   void track(const std::uint8_t* cells);
   bool lifted(const Track& tr, const std::uint8_t* cells) const;
   int alloc_wire();
@@ -90,7 +117,7 @@ class ContactTracker {
   std::uint32_t wire_free_;
   std::vector<std::uint8_t> on_;  // per-cell hysteresis state
   std::vector<Blob> blobs_;
-  int regions_ = 0;
+  std::vector<Region> regions_;
   std::vector<Track> tracks_;
   std::vector<Retired> retired_;
   std::uint16_t next_id_ = 1;

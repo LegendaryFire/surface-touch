@@ -17,6 +17,7 @@ touch::SensorConfig sensor(const DeviceConfig& c) {
   s.baseline = c.baseline;
   s.spawn_gate = c.spawn_gate;
   s.core_join = c.spawn_gate;
+  s.palm_mm2_per_core = c.palm_mm2_per_core;
   return s;
 }
 
@@ -40,7 +41,7 @@ std::vector<Contact> HeatEngine::process(const Frame& f) {
   releases_.clear();
   for (const touch::Retired& d : tracker_.retired()) {
     const auto [px, py] = to_ptp_xy(d.x, d.y, cfg_);
-    releases_.push_back(Contact{px, py, d.wire, /*confidence=*/true,
+    releases_.push_back(Contact{px, py, d.wire, /*confidence=*/!d.palm,
                                 /*in_contact=*/false});
   }
 
@@ -50,7 +51,7 @@ std::vector<Contact> HeatEngine::process(const Frame& f) {
   out.reserve(n);
   for (std::size_t t = 0; t < n; ++t) {
     const auto [px, py] = to_ptp_xy(tracks[t].x, tracks[t].y, cfg_);
-    out.push_back(Contact{px, py, tracks[t].wire, /*confidence=*/true,
+    out.push_back(Contact{px, py, tracks[t].wire, /*confidence=*/!tracks[t].palm,
                           /*in_contact=*/true});
   }
   return out;
