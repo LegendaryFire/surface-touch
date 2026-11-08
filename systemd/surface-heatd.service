@@ -10,8 +10,8 @@ StartLimitIntervalSec=0
 [Service]
 Type=simple
 ExecStart=@LIBEXECDIR@/surface-run-heatd
-# If the pad's hidraw node goes away, heatd exits and the restart
-# re-resolves the node.
+# heatd re-selects the heat stream itself after a resume; if the pad's
+# hidraw node goes away, heatd exits and the restart re-resolves the node.
 Restart=always
 RestartSec=2
 # Privileged HID feature-report writes (heat-stream mode select 0x05,

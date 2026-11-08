@@ -23,10 +23,12 @@ PKGBUILD       Arch packaging; surface-touch.install carries the DKMS hooks.
 * **Match identity, never node number.** hidraw numbers are assigned at
   enumeration and differ between boots. Rules, scripts and units key on
   `045e:0c46` / `045e:0c5d`. Any new rule you write must too.
-* **Resume re-creates the hidraw nodes.** The firmware drops the touch
-  controllers across suspend and the driver's `reset_on_resume` path resets
-  them; the nodes come back under new numbers, so anything holding a node
-  must re-resolve it after a resume.
+* **Resume resets the controllers, not the nodes.** The firmware drops the
+  touch controllers across suspend and the driver's `reset_on_resume` path
+  resets them; the HID devices and hidraw nodes stay. A reset pad comes back
+  out of the heat stream, so `heatd` re-selects it (`StreamGuard` in
+  `src/src/main.cpp`: on a detected suspend, or on a report that is not a
+  heat frame).
 * **Arming is per open.** The heat-stream mode (pad, feature `0x05`) and the
   digitiser stream mode (feature `0x05` `[05 01]`) are claimed on every
   device open and never inherited across opens; `digid` reverts with

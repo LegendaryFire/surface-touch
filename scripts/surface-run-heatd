@@ -2,7 +2,7 @@
 # surface-run-heatd — service entry point for the touchpad heat processor.
 # Resolves the pad's hidraw node by identity (the node number can differ
 # between boots), then execs heatd, which selects the heat stream with
-# SET_FEATURE 0x05=1 on open.  If the pad is not present (mid-resume
+# SET_FEATURE 0x05=1 on open and again after a resume or device reset.  If the pad is not present (mid-resume
 # or driver unbound) this exits non-zero and the service restarts and
 # retries a couple of seconds later.
 set -eu

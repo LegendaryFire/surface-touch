@@ -40,6 +40,12 @@ ls -l /dev/surface-thc-pad /dev/surface-thc-digitizer
   grep -i quickspi` for probe errors: `Get ACPI resources failed` means the
   BIOS/ACPI did not mark the port HIDSPI (check for a firmware update; the
   Surface ships with it marked).
+* **touchpad dead after a resume** — the journal should show `heatd:
+  resume after … s suspended; re-arming stream`. If that line is missing or
+  followed by `re-arm failed`, `systemctl restart surface-heatd`.
+* **crash-loop after a resume** — give it one cycle: the services restart
+  on a 2-second cadence while the node settles. Then
+  `systemctl restart surface-heatd` manually and watch the journal.
 
 ## 3. Desktop sees nothing
 

@@ -51,15 +51,15 @@ each other in udev rules or desktop device lists.
 This platform has **s2idle only**. Across suspend the firmware powers the
 touch controllers down — ACPI `_PS3` asserts the panel reset line unless
 wake is armed — so on resume the driver **resets** them (the
-`reset_on_resume` path). The re-enumeration that follows the reset
-re-creates the `/dev/hidrawN` nodes under new numbers, so the numbers
-must never be hard-coded.
+`reset_on_resume` path). The HID devices and their `/dev/hidrawN` nodes
+persist across the reset; the controllers come back in their default report
+mode.
 
 Consequences built into this package:
 
-* A resume therefore looks like an unplug/replug to userspace: the running
-  processor loses its node, exits, and the service restarts against the
-  new one.
+* `heatd` re-selects the heat stream after a resume, and whenever a report
+  arrives that is not a heat frame (a device-initiated reset), on the node
+  it already has open.
 * The digitizer keeps its stream mode across the resume reset;
   `digid` has no re-arm of its own.
 * **Never** open a hard-coded `/dev/hidrawN`: the numbers are assigned at

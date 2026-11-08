@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+- The touchpad was often dead after waking from suspend: the driver resets
+  the controller on resume, which drops it out of the heat stream, and
+  `heatd` kept reading the same node without selecting the stream again.
+  `heatd` now re-selects the heat stream once per detected suspend, and on a
+  report that is not a heat frame (a device-initiated reset).
+
+### Changed
+- Documentation: resume resets the touch controllers but keeps the HID
+  devices and their hidraw nodes; the earlier text said the nodes are
+  re-created under new numbers on every resume.
+
 ## 1.0.0 — 2026-11-07
 
 First production release.
