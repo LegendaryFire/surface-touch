@@ -13,6 +13,11 @@
   a palm (the writing hand resting on the screen).
 
 ### Fixed
+- A two-finger scroll could spring back on release. As the first finger
+  lifts, its core fades a frame before the rest of its contact; the other
+  finger's contact grew across the fading cells and jumped several mm
+  towards it, and kinetic scrolling flung on that jump. Contacts now grow
+  only downhill from their core, so a fading neighbour stays out of them.
 - The touchpad was often dead after waking from suspend: the driver resets
   the controller on resume, which drops it out of the heat stream, and
   `heatd` kept reading the same node without selecting the stream again.

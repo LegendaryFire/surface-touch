@@ -135,7 +135,11 @@ void ContactTracker::threshold(const std::uint8_t* cells) {
 // below core_join that contain a core cell (<= spawn_gate), so cores joined
 // by a shallow saddle are one seed. Seeds grow through ON cells by
 // 4-connected multi-source BFS, so touches sharing one ON region stay
-// separate. ON regions with no core are dropped.
+// separate, and only downhill: into cells no stronger than the cell they grow
+// from. A finger's signal falls away from its core, so a rise means another
+// finger's cells. Growing over it would pull this contact towards a
+// neighbour whose core has faded (a lifting finger), which the host sees as
+// a jump at the end of a gesture. ON regions with no core are dropped.
 void ContactTracker::segment(const std::uint8_t* cells) {
   blobs_.clear();
   const int R = cfg_.rows, C = cfg_.cols, N = R * C;
@@ -172,7 +176,7 @@ void ContactTracker::segment(const std::uint8_t* cells) {
       const int lbl = labp[i];
       const int cr = i / C, cc = i % C;
       auto visit = [&](int j) {
-        if (on_[j] && labp[j] == 0) { labp[j] = lbl; q.push_back(j); }
+        if (on_[j] && labp[j] == 0 && cells[j] >= cells[i]) { labp[j] = lbl; q.push_back(j); }
       };
       if (cc + 1 < C) visit(i + 1);
       if (cc > 0)     visit(i - 1);
