@@ -10,7 +10,7 @@
 
 CXX      ?= g++
 CXXFLAGS ?= -std=c++20 -O2 -Wall -Wextra -Wpedantic
-CPPFLAGS += -Iinclude -Ibuild
+CPPFLAGS += -Iinclude
 
 # OpenCV (the segmentation-stage algorithms: cv::connectedComponents,
 # cv::moments).  Only core+imgproc+geometry are linked — never another
@@ -37,24 +37,18 @@ OBJ        := $(patsubst $(SRC_DIR)/%.cpp,$(BUILD)/%.o,$(DAEMON_SRC))
 DIGI_SRC   := $(wildcard $(SRC_DIR)/digi/*.cpp)
 DIGI_OBJ   := $(patsubst $(SRC_DIR)/digi/%.cpp,$(BUILD)/digi/%.o,$(DIGI_SRC))
 
-GEN := $(BUILD)/ptp_collection.hpp
-BIN2HPP := tools/bin2hpp.py
-
 all: heatd digid
 
-# Generated header: the uhid front descriptor is the committed fixture, not
-# a hand copy (fixtures/ptp_collection_000D_0005.bin is a byte-exact slice
-# of the device's own report descriptor).
-$(GEN): fixtures/ptp_collection_000D_0005.bin $(BIN2HPP)
-	@mkdir -p $(BUILD)
-	python3 $(BIN2HPP) $< $@ ptp collection
-
-$(BUILD)/%.o: $(SRC_DIR)/%.cpp $(GEN) | $(BUILD)
+$(BUILD)/%.o: $(SRC_DIR)/%.cpp | $(BUILD)
 	$(CXX) $(CXXFLAGS) $(CPPFLAGS) -c $< -o $@
 
 $(BUILD)/digi/%.o: $(SRC_DIR)/digi/%.cpp | $(BUILD)
 	@mkdir -p $(BUILD)/digi
 	$(CXX) $(CXXFLAGS) $(CPPFLAGS) -c $< -o $@
+
+# The pad front's descriptor is the committed fixture, embedded at compile
+# time (include/ptp_collection.hpp).
+$(BUILD)/main.o: include/ptp_collection.hpp fixtures/ptp_collection_000D_0005.bin
 
 heatd: $(OBJ)
 	$(CXX) $(CXXFLAGS) $^ -o $@ $(OPENCV_LIBS)

@@ -68,7 +68,7 @@ The processors link OpenCV (Apache-2.0) dynamically, for the segmentation
 stage only (connected components and moments); no OpenCV sources are
 bundled.
 
-## udev rules, systemd units, scripts
+## udev rules and systemd units
 
 Written for this project (MIT). They match the hardware by firmware-reported
 identity only — never by hidraw number, which is assigned at enumeration and

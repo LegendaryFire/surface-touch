@@ -25,14 +25,8 @@ MODPROBEDIR ?= /etc/modprobe.d
 DOCDIR   ?= $(PREFIX)/share/doc/$(NAME)
 USRSRCDIR ?= /usr/src/$(MODULE)-$(VERSION)
 
-# runtime paths written into the installed units and scripts
-RUN_BINDIR     := $(BINDIR)
-RUN_LIBEXECDIR := $(LIBDIR)/$(NAME)
-RUN_DOCDIR     := $(DOCDIR)
-
-SED = sed -e 's|@BINDIR@|$(RUN_BINDIR)|g' \
-        -e 's|@LIBEXECDIR@|$(RUN_LIBEXECDIR)|g' \
-        -e 's|@DOCDIR@|$(RUN_DOCDIR)|g'
+# runtime paths written into the installed units
+SED = sed -e 's|@BINDIR@|$(BINDIR)|g' -e 's|@DOCDIR@|$(DOCDIR)|g'
 
 .PHONY: all clean install uninstall dist
 
@@ -45,12 +39,6 @@ clean:
 install: all
 	install -d $(DESTDIR)$(BINDIR)
 	install -m 0755 src/heatd src/digid $(DESTDIR)$(BINDIR)/
-	install -d $(DESTDIR)$(LIBDIR)/$(NAME)
-	install -m 0755 scripts/surface-resolve-hidraw $(DESTDIR)$(LIBDIR)/$(NAME)/
-	$(SED) scripts/surface-run-heatd   > $(DESTDIR)$(LIBDIR)/$(NAME)/surface-run-heatd
-	$(SED) scripts/surface-run-digid > $(DESTDIR)$(LIBDIR)/$(NAME)/surface-run-digid
-	chmod 0755 $(DESTDIR)$(LIBDIR)/$(NAME)/surface-run-heatd \
-	           $(DESTDIR)$(LIBDIR)/$(NAME)/surface-run-digid
 	install -d $(DESTDIR)$(UNITDIR)
 	$(SED) systemd/surface-heatd.service   > $(DESTDIR)$(UNITDIR)/surface-heatd.service
 	$(SED) systemd/surface-digid.service > $(DESTDIR)$(UNITDIR)/surface-digid.service
@@ -76,14 +64,13 @@ ifeq ($(DESTDIR),)
 	dkms install -m $(MODULE) -v $(VERSION)
 	systemctl daemon-reload
 	udevadm control --reload-rules
-	udevadm trigger --subsystem-match=hid --action=add || true
-	udevadm trigger --subsystem-match=hidraw || true
+	udevadm trigger --subsystem-match=hidraw --action=add || true
 	@echo "installed.  check:  systemctl status surface-heatd.service surface-digid.service"
 endif
 
 uninstall:
 	rm -f $(DESTDIR)$(BINDIR)/heatd $(DESTDIR)$(BINDIR)/digid
-	rm -rf $(DESTDIR)$(LIBDIR)/$(NAME)
+	rm -rf $(DESTDIR)$(LIBDIR)/$(NAME)  # service scripts of earlier versions
 	rm -f $(DESTDIR)$(UNITDIR)/surface-heatd.service $(DESTDIR)$(UNITDIR)/surface-digid.service
 	rm -f $(DESTDIR)$(UDEVDIR)/90-surface-touch.rules
 	rm -f $(DESTDIR)$(MODPROBEDIR)/surface-touch.conf

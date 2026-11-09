@@ -6,6 +6,8 @@
 #include <cstdint>
 #include <optional>
 
+#include "wire.hpp"
+
 namespace digi {
 
 // Fixed 4350-byte containers, id 0x1A (declared == wire).
@@ -55,13 +57,8 @@ struct Frame {
   std::uint8_t state_b;        // raw (entry 15 low byte)
 };
 
-inline std::uint16_t le16(const std::uint8_t* p) {
-  return std::uint16_t(p[0]) | std::uint16_t(p[1]) << 8;
-}
-inline std::uint32_t le32(const std::uint8_t* p) {
-  return std::uint32_t(p[0]) | std::uint32_t(p[1]) << 8 |
-         std::uint32_t(p[2]) << 16 | std::uint32_t(p[3]) << 24;
-}
+using wire::le16;
+using wire::le32;
 
 // Every anchor must match for the class its class tag declares; a mismatch
 // rejects the whole frame.

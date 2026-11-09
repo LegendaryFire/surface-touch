@@ -13,15 +13,12 @@
 # The stack's own uhid devices (045e:4c46 pad front, 045e:4d54 touch front,
 # 045e:5045 pen front) never match these rules.
 
-# Stable names for the raw transports (debugging, diagnostics, scripts).
-ACTION=="add", SUBSYSTEM=="hidraw", ENV{HID_ID}=="*:0000045E:00000C46", \
-	TAG+="systemd", SYMLINK+="surface-thc-pad"
-ACTION=="add", SUBSYSTEM=="hidraw", ENV{HID_ID}=="*:0000045E:00000C5D", \
-	TAG+="systemd", SYMLINK+="surface-thc-digitizer"
-
-# Start the processors when their device appears (boot and hotplug).  The services resolve the node again
-# at each start and keep retrying, so no race with enumeration timing.
-ACTION=="add", SUBSYSTEM=="hid", ENV{MODALIAS}=="*v0000045Ep00000C46", \
-	TAG+="systemd", ENV{SYSTEMD_WANTS}+="surface-heatd.service"
-ACTION=="add", SUBSYSTEM=="hid", ENV{MODALIAS}=="*v0000045Ep00000C5D", \
-	TAG+="systemd", ENV{SYSTEMD_WANTS}+="surface-digid.service"
+# Each transport's hidraw node gets a stable name and a systemd device unit
+# (dev-surface\x2dthc\x2dpad.device, dev-surface\x2dthc\x2ddigitizer.device),
+# and starts its processor when it appears; the service's BindsTo stops the
+# processor when the node goes away. Every event but "remove" keeps the
+# symlink: udev drops a symlink on any event whose rules do not add it.
+ACTION!="remove", SUBSYSTEM=="hidraw", ENV{HID_ID}=="*:0000045E:00000C46", \
+	TAG+="systemd", SYMLINK+="surface-thc-pad", ENV{SYSTEMD_WANTS}+="surface-heatd.service"
+ACTION!="remove", SUBSYSTEM=="hidraw", ENV{HID_ID}=="*:0000045E:00000C5D", \
+	TAG+="systemd", SYMLINK+="surface-thc-digitizer", ENV{SYSTEMD_WANTS}+="surface-digid.service"

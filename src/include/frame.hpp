@@ -6,6 +6,8 @@
 #include <cstdint>
 #include <optional>
 
+#include "wire.hpp"
+
 namespace heat {
 
 // Fixed 1000-byte reports, id 0x0A, ~125 Hz.
@@ -48,10 +50,7 @@ struct Frame {
   std::uint8_t phys = 0;                 // b635 physical device state (above)
 };
 
-inline std::uint32_t le32(const std::uint8_t* p) {
-  return std::uint32_t(p[0]) | std::uint32_t(p[1]) << 8 |
-         std::uint32_t(p[2]) << 16 | std::uint32_t(p[3]) << 24;
-}
+using wire::le32;
 
 // A frame is valid only if every anchor matches; never partially decoded.
 inline std::optional<Frame> parse_frame(const std::uint8_t* buf, std::size_t n,

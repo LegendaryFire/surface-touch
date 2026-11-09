@@ -20,18 +20,14 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
-#include <cstring>
 #include <vector>
+
+#include "wire.hpp"
 
 namespace pen {
 
-inline std::uint16_t le16(const std::uint8_t* p) {
-  return std::uint16_t(p[0]) | std::uint16_t(p[1]) << 8;
-}
-inline std::uint32_t le32(const std::uint8_t* p) {
-  return std::uint32_t(p[0]) | std::uint32_t(p[1]) << 8 |
-         std::uint32_t(p[2]) << 16 | std::uint32_t(p[3]) << 24;
-}
+using wire::le16;
+using wire::le32;
 
 // --- container grammar -------------------------------------------------------
 //

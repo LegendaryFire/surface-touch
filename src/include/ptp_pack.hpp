@@ -19,21 +19,11 @@
 #include <vector>
 
 #include "engine.hpp"
+#include "wire.hpp"
 
 namespace heat {
 
-// Write n <= 32 bits of v at absolute bit position `at` (LSB-first).
-// Written as free-function, by-value position arithmetic — harder to
-// misuse than the stateful-writer form it replaced.
-inline void put_bits(std::uint8_t* p, std::size_t at, std::uint32_t v, unsigned n) {
-  for (unsigned i = 0; i < n; ++i) {
-    const std::size_t k = at + i;
-    const unsigned m = 1u << (k & 7u);
-    unsigned byte = p[k >> 3];
-    byte = (byte & ~m) | (((v >> i) & 1u) ? m : 0u);
-    p[k >> 3] = static_cast<std::uint8_t>(byte);
-  }
-}
+using wire::put_bits;
 
 // Packs one 0x81 report (payload only, report-id byte excluded — same
 // convention as the descriptor bit totals). The 5 contact slots declared by

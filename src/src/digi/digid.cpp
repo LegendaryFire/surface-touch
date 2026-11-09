@@ -2,7 +2,7 @@
 // digid — Surface digitizer processor.
 //
 // Usage:
-//   sudo ./digid --live [--bdf 0000:00:10.6] [--verbose] [--record FILE.binl]
+//   sudo ./digid --hidraw /dev/surface-thc-digitizer [--verbose] [--record FILE.binl]
 //     GET 0x05 -> SET [05 01] -> stream 0x1A containers into the engine and
 //     the uhid MT front ('Surface Digitizer Touch'), pen-family frames into the
 //     pen feed and the uhid pen front ('Surface Digitizer Pen') -> SET [05 00]
@@ -15,12 +15,9 @@
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
-#include <dirent.h>
 #include <fcntl.h>
-#include <libgen.h>  // POSIX basename (driver-name extraction)
-#include <limits.h>
+#include <getopt.h>
 #include <linux/hidraw.h>
-#include <linux/uhid.h>
 #include <map>
 #include <string>
 #include <vector>
@@ -30,7 +27,9 @@
 #include "digi_frame.hpp"
 #include "digi_pipeline.hpp"
 #include "digi_uhid.hpp"
+#include "hidraw_node.hpp"
 #include "pen_feed.hpp"
+#include "uhid_device.hpp"
 
 namespace {
 
@@ -56,127 +55,19 @@ void append_releases(digi::DigiEngine& eng, std::vector<digi::Contact>& contacts
   }
 }
 
-// ---- uhid front (host-side virtual device) ----------------------------------
-// One class, two instances: the digitizer's virtual multitouch device and
-// the virtual pen device. They differ ONLY in the FrontSpec below: name, id
-// and phys are all distinct, so the fronts never collide (the phys arrives
-// per front from the caller). CREATE2 with the spec's descriptor, INPUT2 per
-// judged frame, and replies to the kernel's feature requests (the pen
-// collection declares no feature report, so its reply is the empty vector).
-struct FrontSpec {
-  const char* name;
-  unsigned vendor, product;
-  const std::uint8_t* rd;
-  std::size_t rd_size;
-  std::vector<std::uint8_t> (*reply)(std::uint8_t);
-};
+// ---- uhid fronts (host-side virtual devices) --------------------------------
+// The digitizer's virtual multitouch device and its virtual pen device. Name,
+// id and phys are all distinct, so the fronts never collide. The pen
+// collection declares no feature report, so its reply is always empty.
+uhid::DeviceSpec touch_spec() {
+  return {digi::uhid::kName, digi::uhid::kVendor, digi::uhid::kProduct,
+          digi::uhid::kRdesc, digi::uhid::kRdescSize, &digi::uhid::feature_reply};
+}
 
-constexpr FrontSpec kTouchSpec{digi::uhid::kName,   digi::uhid::kVendor,
-                               digi::uhid::kProduct, digi::uhid::kRdesc,
-                               digi::uhid::kRdescSize,
-                               &digi::uhid::feature_reply};
-constexpr FrontSpec kPenSpec{digi::penhid::kName,    digi::penhid::kVendor,
-                             digi::penhid::kProduct, digi::penhid::kRdesc,
-                             digi::penhid::kRdescSize,
-                             &digi::penhid::feature_reply};
-
-class UhidFront {
- public:
-  // phys is copied into the HID device's phys string ("pci-<bdf>/digid"
-  // for the touch front, "pci-<bdf>/digid-pen" for the pen front).
-  bool open_front(const char* phys, const FrontSpec& spec = kTouchSpec) {
-    spec_ = &spec;
-    fd_ = ::open("/dev/uhid", O_RDWR | O_NONBLOCK);
-    if (fd_ < 0) {
-      std::fprintf(stderr, "digid: open /dev/uhid: %s\n", std::strerror(errno));
-      return false;
-    }
-    uhid_event ev{};
-    ev.type = UHID_CREATE2;
-    auto& c = ev.u.create2;
-    std::snprintf(reinterpret_cast<char*>(c.name), sizeof(c.name), "%s",
-                  spec_->name);
-    std::snprintf(reinterpret_cast<char*>(c.phys), sizeof(c.phys), "%s", phys);
-    c.rd_size = static_cast<__u16>(spec_->rd_size);
-    c.bus = 0x18;  // BUS_VIRTUAL
-    c.vendor = spec_->vendor;
-    c.product = spec_->product;
-    c.version = 0x0001;
-    c.country = 0;
-    std::memcpy(c.rd_data, spec_->rd, spec_->rd_size);
-    const std::size_t bytes =
-        offsetof(uhid_event, u.create2.rd_data) + spec_->rd_size;
-    if (::write(fd_, &ev, bytes) != static_cast<ssize_t>(bytes)) {
-      std::fprintf(stderr, "digid: UHID_CREATE2: %s\n", std::strerror(errno));
-      return false;
-    }
-    created_ = true;
-    return true;
-  }
-  ~UhidFront() {
-    if (fd_ >= 0) {
-      if (created_) {
-        uhid_event ev{};
-        ev.type = UHID_DESTROY;
-        if (::write(fd_, &ev, sizeof(ev)) < 0) std::fprintf(stderr, "digid: UHID_DESTROY failed\n");
-      }
-      ::close(fd_);
-    }
-  }
-  bool send_input(std::uint8_t report_id, const std::uint8_t* payload,
-                  std::size_t n) {
-    uhid_event ev{};
-    ev.type = UHID_INPUT2;
-    ev.u.input2.size = static_cast<__u16>(n + 1);
-    ev.u.input2.data[0] = report_id;
-    std::memcpy(ev.u.input2.data + 1, payload, n);
-    const std::size_t bytes = offsetof(uhid_event, u.input2.data) + n + 1;
-    return ::write(fd_, &ev, bytes) == static_cast<ssize_t>(bytes);
-  }
-  // Handle pending kernel events without blocking.
-  void pump() {
-    for (;;) {
-      uhid_event ev;
-      const ssize_t r = ::read(fd_, &ev, sizeof(ev));
-      if (r < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) return;
-      if (r != static_cast<ssize_t>(sizeof(ev))) return;
-      switch (ev.type) {
-        case UHID_START: started_ = true; break;
-        case UHID_STOP: started_ = false; break;
-        case UHID_GET_REPORT: {
-          auto v = spec_->reply(static_cast<std::uint8_t>(ev.u.get_report.rnum));
-          uhid_event rep{};
-          rep.type = UHID_GET_REPORT_REPLY;
-          rep.u.get_report_reply.id = ev.u.get_report.id;
-          rep.u.get_report_reply.err = 0;
-          rep.u.get_report_reply.size = static_cast<__u16>(v.size());
-          if (!v.empty())
-            std::memcpy(rep.u.get_report_reply.data, v.data(), v.size());
-          const std::size_t bytes =
-              offsetof(uhid_event, u.get_report_reply.data) + v.size();
-          if (::write(fd_, &rep, bytes) != static_cast<ssize_t>(bytes)) return;
-          break;
-        }
-        case UHID_SET_REPORT: {
-          uhid_event rep{};  // the kernel waits for a reply
-          rep.type = UHID_SET_REPORT_REPLY;
-          rep.u.set_report_reply.id = ev.u.set_report.id;
-          if (::write(fd_, &rep, sizeof(rep)) < 0) return;
-          break;
-        }
-        default: break;
-      }
-    }
-  }
-  bool started() const { return started_; }
-  const char* name() const { return spec_->name; }
-
- private:
-  const FrontSpec* spec_ = &kTouchSpec;
-  int fd_ = -1;
-  bool created_ = false;
-  bool started_ = false;
-};
+uhid::DeviceSpec pen_spec() {
+  return {digi::penhid::kName, digi::penhid::kVendor, digi::penhid::kProduct,
+          digi::penhid::kRdesc, digi::penhid::kRdescSize, &digi::penhid::feature_reply};
+}
 
 // Pen-family wire ids: the containers the pen Assembler walks. 0x1A is the
 // touch container (its pen-chain sections are counted, not needed by the pen
@@ -204,52 +95,13 @@ class PenProximity {
 
 // ---- live mode ---------------------------------------------------------------
 // One fd for the whole session:
-//   resolve node -> GET 0x05 -> SET [05 01] -> stream -> SET [05 00] -> close
+//   open node -> check identity -> GET 0x05 -> SET [05 01] -> stream -> SET [05 00] -> close
 // The mode belongs to this open, so this process reverts it at teardown.
 // GET 0x05 readbacks are logged only; nothing branches on them. The first
 // 0x1A container is the signal that the arm took effect. A failed feature
 // write is never retried.
 inline constexpr std::uint8_t kArmReport = 0x05;  // the only feature id sent
-constexpr char kBdfDefault[] = "0000:00:10.6";
-
-// Finds the hidraw node under bdf. Requires bdf to be bound to intel_quickspi
-// and refuses the pad function.
-bool resolve_hidraw(const char* bdf, std::string& node, std::string& phys) {
-  if (!std::strcmp(bdf, "0000:00:10.7")) {
-    std::fprintf(stderr, "digid: %s is the PAD function — heatd serves it; "
-                 "--live is the digitizer port only\n", bdf);
-    return false;
-  }
-  DIR* dir = ::opendir("/sys/class/hidraw");
-  if (!dir) { std::perror("digid: opendir /sys/class/hidraw"); return false; }
-  std::string tag = std::string("/") + bdf + "/";
-  for (dirent* e; (e = ::readdir(dir)) != nullptr;) {
-    if (std::strncmp(e->d_name, "hidraw", 6) != 0) continue;
-    char path[PATH_MAX], real[PATH_MAX];
-    std::snprintf(path, sizeof(path), "/sys/class/hidraw/%s/device", e->d_name);
-    if (!::realpath(path, real)) continue;
-    if (!std::strstr(real, tag.c_str())) continue;
-    std::snprintf(path, sizeof(path), "/sys/bus/pci/devices/%s/driver", bdf);
-    char link[PATH_MAX];
-    ssize_t n = ::readlink(path, link, sizeof(link) - 1);
-    if (n <= 0) { std::fprintf(stderr, "digid: %s is driver-unclaimed — is "
-        "intel_quickspi (surface-thc-hid) installed and loaded?\n", bdf);
-      ::closedir(dir); return false; }
-    link[n] = '\0';
-    if (std::strcmp(::basename(link), "intel_quickspi") != 0) {
-      std::fprintf(stderr, "digid: %s is bound to '%s', not intel_quickspi\n",
-          bdf, ::basename(link));
-      ::closedir(dir); return false;
-    }
-    node = std::string("/dev/") + e->d_name;
-    phys = std::string("pci-") + bdf + "/digid";
-    ::closedir(dir);
-    return true;
-  }
-  ::closedir(dir);
-  std::fprintf(stderr, "digid: no hidraw node under %s (digitizer not bound?)\n", bdf);
-  return false;
-}
+inline constexpr hidraw::Identity kDigitizer{0x045E, 0x0C5D};
 
 int feature_get(int fd, std::uint8_t& mode, const char* when) {
   std::uint8_t buf[2] = {kArmReport, 0};
@@ -287,28 +139,35 @@ void write_record(std::FILE* f, const std::uint8_t* buf, std::uint32_t len) {
   std::fwrite(buf, 1, len, f);
 }
 
-int live(const char* bdf, bool verbose, const char* record_path) {
-  std::string node, phys;
-  if (!resolve_hidraw(bdf, node, phys)) return 2;
+int live(const char* node, bool verbose, const char* record_path) {
+  int fd = ::open(node, O_RDWR | O_NONBLOCK | O_CLOEXEC);
+  if (fd < 0) {
+    std::fprintf(stderr, "digid: open %s: %s (needs root)\n", node, std::strerror(errno));
+    return 2;
+  }
+  // Only the digitizer's transport is ever armed.
+  const auto id = hidraw::identity(fd);
+  if (!id || id->vendor != kDigitizer.vendor || id->product != kDigitizer.product) {
+    std::fprintf(stderr, "digid: %s is not the digitizer (%04x:%04x)\n", node,
+                 kDigitizer.vendor, kDigitizer.product);
+    ::close(fd);
+    return 2;
+  }
+  const std::string function = hidraw::pci_function(node);
+  const std::string phys = function.empty() ? "" : "pci-" + function + "/digid";
   // Open the recording before arming, so a bad path never arms the port.
   std::FILE* rec = nullptr;
   if (record_path) {
     rec = std::fopen(record_path, "wb");
     if (!rec) {
       std::fprintf(stderr, "digid: open %s: %s\n", record_path, std::strerror(errno));
+      ::close(fd);
       return 2;
     }
     std::printf("digid: live: recording to %s\n", record_path);
   }
-  std::printf("digid: live: node %s (bdf %s, front phys %s)\n",
-              node.c_str(), bdf, phys.c_str());
-  int fd = ::open(node.c_str(), O_RDWR | O_NONBLOCK);
-  if (fd < 0) {
-    std::fflush(stdout);  // keep the node line ahead of the error
-    std::fprintf(stderr, "digid: open %s: %s (needs root)\n", node.c_str(),
-                 std::strerror(errno));
-    return 2;
-  }
+  std::printf("digid: live: node %s (pci %s, front phys %s)\n", node,
+              function.c_str(), phys.c_str());
   std::uint8_t mode = 0xFF;
   if (feature_get(fd, mode, "pre-state") == 0)
     std::printf("  GET 0x05 pre-state: mode=%u (a GET readback lags one "
@@ -319,14 +178,14 @@ int live(const char* bdf, bool verbose, const char* record_path) {
     std::printf("  GET 0x05 post-arm: mode=%u — 0 here is the expected lag; "
                 "the first 0x1A is the commit signal\n", mode);
 
-  UhidFront front, pfront;
-  if (!front.open_front(phys.c_str())) {  // revert the mode before exiting
+  uhid::Device front, pfront;
+  if (!front.open(touch_spec(), phys)) {  // revert the mode before exiting
     feature_set(fd, 0, "post-open-failure revert");
     ::close(fd);
     return 2;
   }
   const std::string pen_phys = phys + "-pen";  // distinct phys, no collision
-  if (!pfront.open_front(pen_phys.c_str(), kPenSpec)) {
+  if (!pfront.open(pen_spec(), pen_phys)) {
     feature_set(fd, 0, "post-pen-open-failure revert");
     ::close(fd);
     return 2;
@@ -436,28 +295,40 @@ int live(const char* bdf, bool verbose, const char* record_path) {
 
 }  // namespace
 
+void usage(std::FILE* out) {
+  std::fprintf(out,
+               "usage: digid --hidraw NODE [--verbose] [--record FILE.binl]\n"
+               "  NODE is the digitizer's hidraw node (/dev/surface-thc-digitizer).\n"
+               "  Arms the digitizer port (SET_FEATURE [05 01]), serves the\n"
+               "  'Surface Digitizer Touch' and 'Surface Digitizer Pen' fronts, and\n"
+               "  reverts the port at teardown. --record saves every report\n"
+               "  read, for a bug report.\n");
+}
+
 int main(int argc, char** argv) {
-  const char* bdf = kBdfDefault;
+  const char* node = nullptr;
   const char* record_path = nullptr;
-  bool verbose = false, live_mode = false;
-  for (int i = 1; i < argc; ++i) {
-    if (!std::strcmp(argv[i], "--live")) live_mode = true;
-    else if (!std::strcmp(argv[i], "--bdf") && i + 1 < argc) bdf = argv[++i];
-    else if (!std::strcmp(argv[i], "--record") && i + 1 < argc) record_path = argv[++i];
-    else if (!std::strcmp(argv[i], "--verbose") || !std::strcmp(argv[i], "-v"))
-      verbose = true;
-    else {
-      live_mode = false;
-      break;
+  bool verbose = false;
+  enum : int { kHidraw = 256, kRecord };
+  static const option kOptions[] = {
+      {"hidraw", required_argument, nullptr, kHidraw},
+      {"record", required_argument, nullptr, kRecord},
+      {"verbose", no_argument, nullptr, 'v'},
+      {"help", no_argument, nullptr, 'h'},
+      {},
+  };
+  for (int c; (c = getopt_long(argc, argv, "vh", kOptions, nullptr)) != -1;) {
+    switch (c) {
+      case kHidraw: node = optarg; break;
+      case kRecord: record_path = optarg; break;
+      case 'v': verbose = true; break;
+      case 'h': usage(stdout); return 0;
+      default: usage(stderr); return 2;  // getopt_long has named the problem
     }
   }
-  if (!live_mode) {
-    std::fprintf(stderr,
-                 "usage: digid --live [--bdf BDF] [--verbose] [--record FILE.binl]\n"
-                 "  arms the digitizer port (SET_FEATURE [05 01]), serves the\n"
-                 "  'Surface Digitizer Touch' and 'Surface Digitizer Pen' fronts, and\n"
-                 "  reverts the port at teardown. --record saves every report\n"
-                 "  read, for a bug report.\n");
+  if (optind < argc) std::fprintf(stderr, "digid: unexpected argument %s\n", argv[optind]);
+  if (!node || optind < argc) {
+    usage(stderr);
     return 2;
   }
   std::signal(SIGINT, on_sigint);
@@ -468,5 +339,5 @@ int main(int argc, char** argv) {
   std::signal(SIGHUP, on_sigint);
   // SIGUSR1 has no use here; ignore it rather than die with the port armed.
   std::signal(SIGUSR1, SIG_IGN);
-  return live(bdf, verbose, record_path);
+  return live(node, verbose, record_path);
 }

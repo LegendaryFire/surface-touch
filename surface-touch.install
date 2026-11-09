@@ -11,7 +11,7 @@ post_install() {
 	dkms install -m surface-thc-hid -v 1.0.0 || return 1
 	systemctl daemon-reload
 	udevadm control --reload-rules
-	udevadm trigger --subsystem-match=hid --action=add
+	udevadm trigger --subsystem-match=hidraw --action=add
 }
 
 pre_upgrade() {

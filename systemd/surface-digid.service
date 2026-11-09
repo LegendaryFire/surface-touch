@@ -1,18 +1,20 @@
+# SPDX-License-Identifier: MIT
 [Unit]
 Description=Surface digitizer processor (digid — touchscreen + pen)
 Documentation=file:@DOCDIR@/README.md
-# Triggered by udev (90-surface-touch.rules) when the digitizer's transport
-# device appears.
-# The unit carries no [Install] section: the device owns the lifecycle.
+# Started by udev (90-surface-touch.rules) when the digitizer's hidraw node
+# appears, and stopped with it. No [Install] section: the device owns the
+# lifecycle.
+BindsTo=dev-surface\x2dthc\x2ddigitizer.device
+After=dev-surface\x2dthc\x2ddigitizer.device
 # Unlimited restarts — no start rate limit.
 StartLimitIntervalSec=0
 
 [Service]
 Type=simple
-ExecStart=@LIBEXECDIR@/surface-run-digid
-# If the digitizer's hidraw node goes away, digid exits and the next
-# start re-arms the port from scratch (the stream mode is claimed per open
-# and never inherited).
+ExecStart=@BINDIR@/digid --hidraw /dev/surface-thc-digitizer
+# Every start re-arms the port from scratch (the stream mode is claimed per
+# open and never inherited).
 Restart=always
 RestartSec=2
 # Privileged HID feature-report writes (port arming 0x05) go through

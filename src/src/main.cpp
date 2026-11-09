@@ -5,8 +5,8 @@
 // and presents the contacts as a PTP touchpad over uhid, using a collection
 // of the device's own report descriptor.
 #include <fcntl.h>
+#include <getopt.h>
 #include <linux/hidraw.h>
-#include <linux/uhid.h>
 #include <sys/ioctl.h>
 #include <sys/select.h>
 #include <unistd.h>
@@ -14,7 +14,6 @@
 #include <algorithm>
 #include <cerrno>
 #include <chrono>
-#include <climits>
 #include <csignal>
 #include <cstddef>
 #include <cstdint>
@@ -35,8 +34,10 @@
 #include "engine.hpp"
 #include "frame.hpp"
 #include "heat_engine.hpp"
-#include "ptp_collection.hpp"  // generated from the committed descriptor
+#include "hidraw_node.hpp"
+#include "ptp_collection.hpp"
 #include "ptp_pack.hpp"
+#include "uhid_device.hpp"
 
 namespace {
 
@@ -177,129 +178,32 @@ class Pipeline {
 
 // ---- uhid front ----
 
-class UhidOut {
- public:
-  explicit UhidOut(const Front& f) : front_(f) {}
-  ~UhidOut() { close(); }
+uhid::DeviceSpec front_spec(const Options& opt, const Front& f) {
+  uhid::DeviceSpec spec;
+  spec.name = "Surface Heat Processor";
+  spec.vendor = std::uint16_t(opt.vendor);
+  spec.product = std::uint16_t(opt.product);
+  spec.descriptor = ptp::collection;
+  spec.descriptor_size = ptp::collection_size;
+  spec.feature_reply = [&f](std::uint8_t rid) { return feature_reply(rid, f); };
+  return spec;
+}
 
-  bool open(const Options& opt, const char* phys) {
-    fd_ = ::open("/dev/uhid", O_RDWR | O_CLOEXEC);
-    if (fd_ < 0) {
-      std::fprintf(stderr, "heatd: open /dev/uhid: %s\n", std::strerror(errno));
-      return false;
-    }
-    uhid_event ev{};
-    ev.type = UHID_CREATE2;
-    auto& c = ev.u.create2;
-    std::snprintf(reinterpret_cast<char*>(c.name), sizeof(c.name), "%s",
-                  "Surface Heat Processor");
-    std::snprintf(reinterpret_cast<char*>(c.phys), sizeof(c.phys), "%s", phys);
-    c.rd_size = static_cast<__u16>(ptp::collection_size);
-    c.bus = 0x18;  // BUS_VIRTUAL
-    c.vendor = opt.vendor;
-    c.product = opt.product;
-    c.version = 0x0001;
-    c.country = 0;
-    std::memcpy(c.rd_data, ptp::collection, ptp::collection_size);
-    const std::size_t bytes =
-        offsetof(uhid_event, u.create2.rd_data) + ptp::collection_size;
-    if (::write(fd_, &ev, bytes) != static_cast<ssize_t>(bytes)) {
-      std::fprintf(stderr, "heatd: UHID_CREATE2: %s\n", std::strerror(errno));
-      return false;
-    }
-    created_ = true;
-    return true;
-  }
-
-  void close() {
-    if (fd_ < 0) return;
-    if (created_) {
-      uhid_event ev{};
-      ev.type = UHID_DESTROY;
-      if (::write(fd_, &ev, sizeof(ev)) < 0) {
-        // closing the fd destroys the device as well
-      }
-    }
-    ::close(fd_);
-    fd_ = -1;
-    created_ = false;
-  }
-
-  bool send_input(std::uint8_t report_id, const std::uint8_t* payload,
-                  std::size_t n) {
-    uhid_event ev{};
-    ev.type = UHID_INPUT2;
-    ev.u.input2.size = static_cast<__u16>(n + 1);
-    ev.u.input2.data[0] = report_id;
-    std::memcpy(ev.u.input2.data + 1, payload, n);
-    const std::size_t bytes = offsetof(uhid_event, u.input2.data) + n + 1;
-    return ::write(fd_, &ev, bytes) == static_cast<ssize_t>(bytes);
-  }
-
-  bool send_0x81(std::uint16_t ts, const std::vector<heat::Contact>& contacts,
-                 bool button) {
-    std::vector<std::uint8_t> rep(front_.input_0x81_bytes, 0);
-    heat::pack_report_0x81(rep.data(), rep.size(), ts, contacts, button);
-    return send_input(0x81, rep.data(), rep.size());
-  }
-
-  // Handles one kernel event, if any. False on EOF or error.
-  bool pump_one() {
-    uhid_event ev;
-    const ssize_t r = ::read(fd_, &ev, sizeof(ev));
-    if (r < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) return true;
-    if (r != sizeof(ev)) return false;
-    switch (ev.type) {
-      case UHID_START:
-        started_ = true;
-        break;
-      case UHID_STOP:
-        started_ = false;
-        break;
-      case UHID_GET_REPORT: {
-        const auto v = feature_reply(ev.u.get_report.rnum, front_);
-        uhid_event rep{};
-        rep.type = UHID_GET_REPORT_REPLY;
-        rep.u.get_report_reply.id = ev.u.get_report.id;
-        rep.u.get_report_reply.err = 0;
-        rep.u.get_report_reply.size = static_cast<__u16>(v.size());
-        if (!v.empty()) std::memcpy(rep.u.get_report_reply.data, v.data(), v.size());
-        const std::size_t bytes = offsetof(uhid_event, u.get_report_reply.data) + v.size();
-        if (::write(fd_, &rep, bytes) != static_cast<ssize_t>(bytes)) return false;
-        break;
-      }
-      case UHID_SET_REPORT: {
-        uhid_event rep{};  // the kernel waits for a reply
-        rep.type = UHID_SET_REPORT_REPLY;
-        rep.u.set_report_reply.id = ev.u.set_report.id;
-        rep.u.set_report_reply.err = 0;
-        if (::write(fd_, &rep, sizeof(rep)) < 0) return false;
-        break;
-      }
-      default:
-        break;
-    }
-    return true;
-  }
-
-  bool started() const { return started_; }
-  int fd() const { return fd_; }
-
- private:
-  const Front& front_;
-  int fd_ = -1;
-  bool created_ = false;
-  bool started_ = false;
-};
+bool send_0x81(uhid::Device& front, const Front& f, std::uint16_t ts,
+               const std::vector<heat::Contact>& contacts, bool button) {
+  std::vector<std::uint8_t> rep(f.input_0x81_bytes, 0);
+  heat::pack_report_0x81(rep.data(), rep.size(), ts, contacts, button);
+  return front.send_input(0x81, rep.data(), rep.size());
+}
 
 // Sends the frame's report when the front is up. A frame with no contacts is
 // sent once, right after the last one that had some: it ends the kernel's
 // pointer emulation, which release entries alone do not.
-bool emit(UhidOut& uhid, std::uint16_t ts, const std::vector<heat::Contact>& contacts,
-          bool button, bool& prev_nonempty) {
+bool emit(uhid::Device& front, const Front& f, std::uint16_t ts,
+          const std::vector<heat::Contact>& contacts, bool button, bool& prev_nonempty) {
   bool sent = false;
-  if (uhid.started() && (!contacts.empty() || prev_nonempty))
-    sent = uhid.send_0x81(ts, contacts, button);
+  if (front.started() && (!contacts.empty() || prev_nonempty))
+    sent = send_0x81(front, f, ts, contacts, button);
   prev_nonempty = !contacts.empty();
   return sent;
 }
@@ -383,18 +287,10 @@ struct StreamGuard {
   }
 };
 
-// "pci-<bdf>/heatd", from the PCI function in the hidraw node's sysfs path.
+// "pci-<function>/heatd": the front's phys names the PCI function it serves.
 std::string phys_for(const char* hidraw) {
-  std::string base(hidraw);
-  base = base.substr(base.rfind('/') + 1);
-  const std::string link = "/sys/class/hidraw/" + base + "/device";
-  char resolved[PATH_MAX];
-  if (!::realpath(link.c_str(), resolved)) return {};
-  const std::string p(resolved);
-  const auto slash = p.find("/0000:");
-  if (slash == std::string::npos) return {};
-  const auto end = p.find('/', slash + 1);
-  return "pci-" + p.substr(slash + 1, end - slash - 1) + "/heatd";
+  const std::string function = hidraw::pci_function(hidraw);
+  return function.empty() ? std::string() : "pci-" + function + "/heatd";
 }
 
 int run_live(const Options& opt, const Front& f) {
@@ -416,8 +312,8 @@ int run_live(const Options& opt, const Front& f) {
   enable_heat_stream(hdev);
   StreamGuard guard{hdev};
 
-  UhidOut uhid(f);
-  if (!uhid.open(opt, phys_for(opt.hidraw).c_str())) {
+  uhid::Device uhid;
+  if (!uhid.open(front_spec(opt, f), phys_for(opt.hidraw))) {
     ::close(hdev);
     return 3;
   }
@@ -453,7 +349,7 @@ int run_live(const Options& opt, const Front& f) {
       std::fprintf(stderr, "started=%d pressed=%lu\n", int(uhid.started()), p.count.btn);
       next_beat += 2s;
     }
-    if (FD_ISSET(uhid.fd(), &rfds) && !uhid.pump_one()) {
+    if (FD_ISSET(uhid.fd(), &rfds) && !uhid.pump()) {
       std::fprintf(stderr,
                    "heatd: uhid front read hit EOF/error (%s) - the kernel "
                    "removed or broke our device; exiting, counters below\n",
@@ -476,7 +372,7 @@ int run_live(const Options& opt, const Front& f) {
     const auto contacts = p.step(buf, static_cast<std::size_t>(got));
     if (!contacts) continue;
     contacts_total += contacts->size();
-    if (emit(uhid, p.ts16, *contacts, p.button(), prev_nonempty)) ++sent;
+    if (emit(uhid, f, p.ts16, *contacts, p.button(), prev_nonempty)) ++sent;
   }
   uhid.close();
   ::close(hdev);
@@ -501,32 +397,34 @@ void usage(const char* argv0) {
 
 int main(int argc, char** argv) {
   Options opt;
-  auto value = [&](int& i) -> const char* {
-    if (i + 1 >= argc) {
-      std::fprintf(stderr, "heatd: %s needs a value\n", argv[i]);
-      std::exit(2);
-    }
-    return argv[++i];
+  enum : int { kHidraw = 256, kEngine, kDeviceParams, kVendor, kProduct, kPrintDescriptor };
+  static const option kOptions[] = {
+      {"hidraw", required_argument, nullptr, kHidraw},
+      {"engine", required_argument, nullptr, kEngine},
+      {"device-params", required_argument, nullptr, kDeviceParams},
+      {"vendor", required_argument, nullptr, kVendor},
+      {"product", required_argument, nullptr, kProduct},
+      {"print-descriptor", no_argument, nullptr, kPrintDescriptor},
+      {"help", no_argument, nullptr, 'h'},
+      {},
   };
-  auto number = [&](int& i) {
-    return static_cast<unsigned>(std::strtoul(value(i), nullptr, 0));
-  };
-  for (int i = 1; i < argc; ++i) {
-    const std::string_view a{argv[i]};
-    if (a == "--hidraw") opt.hidraw = value(i);
-    else if (a == "--engine") opt.engine = value(i);
-    else if (a == "--device-params") opt.device_params = value(i);
-    else if (a == "--vendor") opt.vendor = number(i);
-    else if (a == "--product") opt.product = number(i);
-    else if (a == "--print-descriptor") opt.print_descriptor = true;
-    else if (a == "--help" || a == "-h") {
-      usage(argv[0]);
-      return 0;
-    } else {
-      std::fprintf(stderr, "heatd: unknown argument %s\n", argv[i]);
-      usage(argv[0]);
-      return 2;
+  auto number = [] { return static_cast<unsigned>(std::strtoul(optarg, nullptr, 0)); };
+  for (int c; (c = getopt_long(argc, argv, "h", kOptions, nullptr)) != -1;) {
+    switch (c) {
+      case kHidraw: opt.hidraw = optarg; break;
+      case kEngine: opt.engine = optarg; break;
+      case kDeviceParams: opt.device_params = optarg; break;
+      case kVendor: opt.vendor = number(); break;
+      case kProduct: opt.product = number(); break;
+      case kPrintDescriptor: opt.print_descriptor = true; break;
+      case 'h': usage(argv[0]); return 0;
+      default: usage(argv[0]); return 2;  // getopt_long has named the problem
     }
+  }
+  if (optind < argc) {
+    std::fprintf(stderr, "heatd: unexpected argument %s\n", argv[optind]);
+    usage(argv[0]);
+    return 2;
   }
   if (opt.print_descriptor) {
     std::fwrite(ptp::collection, 1, ptp::collection_size, stdout);

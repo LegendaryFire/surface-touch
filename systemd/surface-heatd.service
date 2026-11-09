@@ -1,17 +1,19 @@
+# SPDX-License-Identifier: MIT
 [Unit]
 Description=Surface touchpad heat processor (heatd)
 Documentation=file:@DOCDIR@/README.md
-# Triggered by udev (90-surface-touch.rules) when the touchpad's transport
-# device appears.
-# The unit carries no [Install] section: the device owns the lifecycle.
+# Started by udev (90-surface-touch.rules) when the touchpad's hidraw node
+# appears, and stopped with it. No [Install] section: the device owns the
+# lifecycle.
+BindsTo=dev-surface\x2dthc\x2dpad.device
+After=dev-surface\x2dthc\x2dpad.device
 # Unlimited restarts — no start rate limit.
 StartLimitIntervalSec=0
 
 [Service]
 Type=simple
-ExecStart=@LIBEXECDIR@/surface-run-heatd
-# heatd re-selects the heat stream itself after a resume; if the pad's
-# hidraw node goes away, heatd exits and the restart re-resolves the node.
+ExecStart=@BINDIR@/heatd --hidraw /dev/surface-thc-pad
+# heatd re-selects the heat stream itself after a resume.
 Restart=always
 RestartSec=2
 # Privileged HID feature-report writes (heat-stream mode select 0x05,

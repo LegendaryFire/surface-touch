@@ -31,11 +31,11 @@
 #pragma once
 
 #include <cstdint>
-#include <cstring>
 #include <string>
 
 #include "frame.hpp"        // kMatrixCells
 #include "heat_engine.hpp"  // DeviceConfig
+#include "wire.hpp"
 
 namespace heat {
 
@@ -68,18 +68,9 @@ inline bool decode_device_params(const std::uint8_t* b, std::size_t n,
     if (err) *err = m;
     return false;
   };
-  auto u16 = [&](std::size_t o) {
-    return std::uint16_t(b[o]) | std::uint16_t(std::uint16_t(b[o + 1]) << 8);
-  };
-  auto u32 = [&](std::size_t o) {
-    return std::uint32_t(b[o]) | (std::uint32_t(b[o + 1]) << 8) |
-           (std::uint32_t(b[o + 2]) << 16) | (std::uint32_t(b[o + 3]) << 24);
-  };
-  auto fl = [&](std::size_t o) {
-    float f = 0;
-    std::memcpy(&f, b + o, sizeof f);
-    return f;
-  };
+  auto u16 = [&](std::size_t o) { return wire::le16(b + o); };
+  auto u32 = [&](std::size_t o) { return wire::le32(b + o); };
+  auto fl = [&](std::size_t o) { return wire::le_f32(b + o); };
 
   if (n < 120) return fail("buffer shorter than the 120-B v1 response");
   if (b[0] != 0x06) return fail("report id is not 0x06");

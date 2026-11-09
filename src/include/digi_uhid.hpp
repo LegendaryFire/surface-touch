@@ -19,6 +19,7 @@
 #include <vector>
 
 #include "digi_pipeline.hpp"
+#include "wire.hpp"
 
 namespace digi {
 namespace uhid {
@@ -143,16 +144,7 @@ inline constexpr const char* kName = "Surface Digitizer Touch";
 // ContactCount = the number of Contact ENTRIES the engine reported this
 // frame (actives + retire-frame releases, as heatd packs them) — unused
 // array slots stay all-zero exactly as the pad packer leaves them.
-inline void put_bits(std::uint8_t* p, std::size_t at, std::uint32_t v,
-                     unsigned n) {
-  for (unsigned i = 0; i < n; ++i) {
-    const std::size_t k = at + i;
-    const unsigned m = 1u << (k & 7u);
-    unsigned byte = p[k >> 3];
-    byte = (byte & ~m) | (((v >> i) & 1u) ? m : 0u);
-    p[k >> 3] = static_cast<std::uint8_t>(byte);
-  }
-}
+using wire::put_bits;
 
 inline void pack_report_0x0C(std::uint8_t* out, std::size_t payload_bytes,
                              std::uint16_t scan_time,

@@ -32,11 +32,11 @@ journalctl -b -u surface-heatd -u surface-digid | tail -40
 ls -l /dev/surface-thc-pad /dev/surface-thc-digitizer
 ```
 
-* `active (running)` + a `serving /dev/hidrawN` line in the journal is the
-  healthy answer. The node number is irrelevant — it is re-resolved every
-  start, and can differ between boots.
-* **restarting with "no … hidraw node (045e:0c46) within 15 s"** — the pad
-  transport did not enumerate. If step 1 was fine, check `dmesg -T |
+* `active (running)`, with `heatd: calibration:` and `digid: live: node`
+  lines in the journal, is the healthy answer.
+* **a service inactive and its `/dev/surface-thc-*` symlink missing** — the
+  transport did not enumerate, so udev never started the service. If step 1
+  was fine, check `dmesg -T |
   grep -i quickspi` for probe errors: `Get ACPI resources failed` means the
   BIOS/ACPI did not mark the port HIDSPI (check for a firmware update; the
   Surface ships with it marked).
@@ -55,7 +55,7 @@ libinput list-devices | grep -B1 -A3 Surface
 
 The three `Surface …` devices must appear; only the touchpad one must move the
 pointer. If `Surface Heat Processor` is there but inert, confirm heatd's
-journal shows `S1 calibration:` and a rising `frames=` counter in the
+journal shows `heatd: calibration:` and a rising `frames=` counter in the
 2-second heartbeats while you drag.
 
 ## 4. Pad dies on boot with `hidraw read: Input/output error`
@@ -63,8 +63,8 @@ journal shows `S1 calibration:` and a rising `frames=` counter in the
 There is a known boot race: the pad's own descriptor can load
 `hid-multitouch` ~0.4 s after the port is claimed, which re-binds the pad
 and destroys the hidraw node `heatd` opened (dmesg shows `Wrong input
-report length: 15` around it). The service exits and is restarted a moment
-later — it recovers by design. Persistent failure at this exact point is a
+report length: 15` around it). The service stops with the node and starts
+again when udev re-creates it — it recovers by design. Persistent failure at this exact point is a
 bug: file a report with the journal.
 
 ## 5. Everything worked, then the pad froze and dmesg shows `-110`

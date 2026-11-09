@@ -28,6 +28,8 @@
 #include <cstdint>
 #include <vector>
 
+#include "wire.hpp"
+
 namespace digi {
 namespace penhid {
 
@@ -185,15 +187,7 @@ struct PenReport {
   std::uint8_t vendor = 0;  // FF00:0001 — the device's own field, hidden by hid-input
 };
 
-inline void put_bits(std::uint8_t* p, std::size_t at, std::uint32_t v, unsigned n) {
-  for (unsigned i = 0; i < n; ++i) {
-    const std::size_t k = at + i;
-    const unsigned m = 1u << (k & 7u);
-    unsigned byte = p[k >> 3];
-    byte = (byte & ~m) | (((v >> i) & 1u) ? m : 0u);
-    p[k >> 3] = static_cast<std::uint8_t>(byte);
-  }
-}
+using wire::put_bits;
 
 inline void pack_report_0x01(std::uint8_t* out, const PenReport& r) {
   for (std::size_t i = 0; i < kInputPayloadBytes; ++i) out[i] = 0;

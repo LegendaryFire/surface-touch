@@ -23,9 +23,23 @@
 - The developer modes of `heatd` (`--replay`, `--uhid-replay`, `--script`,
   `--trace`, `--gate`) and `digid` (`--replay`, `--uhid-replay`,
   `--trace-pen`, `--gate`, `--rate`). The services never used them.
-  `digid --live --record FILE` still saves a session.
+  `digid --record FILE` still saves a session.
+- The service scripts (`surface-resolve-hidraw`, `surface-run-heatd`,
+  `surface-run-digid`) and the descriptor generator (`tools/bin2hpp.py`).
+  Building no longer needs Python.
 
 ### Changed
+- The services start `heatd --hidraw /dev/surface-thc-pad` and
+  `digid --hidraw /dev/surface-thc-digitizer` directly and are bound to
+  those nodes' device units: udev starts them when the node appears and
+  they stop when it goes away. `digid` takes `--hidraw NODE` in place of
+  `--live --bdf BDF`, and refuses any node that is not the digitizer.
+- The udev symlinks survive every event but "remove"; a "change" event
+  (such as the one `make install` triggers) used to drop them.
+- Building needs GCC 15 or newer: the pad descriptor is compiled in with
+  `#embed`.
+- Both programs parse options with `getopt_long`, so `--opt=value` works
+  and `digid` gains `--help`.
 - Documentation: resume resets the touch controllers but keeps the HID
   devices and their hidraw nodes; the earlier text said the nodes are
   re-created under new numbers on every resume.

@@ -9,8 +9,6 @@ module/        DKMS package (dkms.conf + drivers/hid/intel-thc-hid sources).
                  make -C module KDIR=/lib/modules/$(uname -r)/build
 src/           heatd (pad) + digid (digitiser). `make` in src/
                builds both.
-scripts/       resolver + service entry points (path tokens @BINDIR@/
-               @LIBEXECDIR@ are substituted by the top-level install).
 udev/          90-surface-touch.rules — identity matching, symlinks, triggers.
 systemd/       the two services (device-triggered, restart-churn-tolerant).
 modprobe.d/    ithc exclusion.
@@ -21,8 +19,9 @@ PKGBUILD       Arch packaging; surface-touch.install carries the DKMS hooks.
 ## Design decisions worth knowing before you change things
 
 * **Match identity, never node number.** hidraw numbers are assigned at
-  enumeration and differ between boots. Rules, scripts and units key on
-  `045e:0c46` / `045e:0c5d`. Any new rule you write must too.
+  enumeration and differ between boots. The udev rules key on
+  `045e:0c46` / `045e:0c5d` and name the nodes; units and processors use
+  those names. Any new rule you write must key on identity too.
 * **Resume resets the controllers, not the nodes.** The firmware drops the
   touch controllers across suspend and the driver's `reset_on_resume` path
   resets them; the HID devices and hidraw nodes stay. A reset pad comes back
@@ -46,10 +45,10 @@ PKGBUILD       Arch packaging; surface-touch.install carries the DKMS hooks.
   desktop device lists.
 * **Descriptors are fixtures, not hand-written.** The pad front's descriptor
   is a byte-exact collection of the device's own report descriptor
-  (`src/fixtures/`, generated into `src/build/ptp_collection.hpp` by
-  `src/tools/bin2hpp.py`). The digitiser touch front's descriptor is the
-  standard MT-class collection carrying this device's geometry;
-  the pen front is the device's own pen collection kept verbatim. Never
+  (`src/fixtures/`, compiled in with `#embed` by
+  `src/include/ptp_collection.hpp`). The digitiser touch front's descriptor
+  is the standard MT-class collection carrying this device's geometry; the
+  pen front is the device's own pen collection kept verbatim. Never
   hand-edit any of them.
 * **The engine sources are pinned.** `heatd-sources.sha256` pins the heatd
   engine sources; `make identity` checks them on every `digid` link.

@@ -39,8 +39,8 @@ See [NOTICE](NOTICE) for the provenance of every component.
 
 * Surface Laptop Studio 2 (the only machine this is validated on; the module
   also carries other Alder Lake THC SPI IDs — untested, see [NOTICE](NOTICE)).
-* Linux 7.2 or 7.3 with matching **kernel headers**; `dkms`, `gcc`, `make`,
-  `python3`, and **OpenCV ≥ 5** (Arch: `pacman -S dkms opencv`).
+* Linux 7.2 or 7.3 with matching **kernel headers**; `dkms`, `gcc` 15 or
+  newer, `make`, and **OpenCV ≥ 5** (Arch: `pacman -S dkms opencv`).
 * The `linux-surface` kernel is recommended on a Surface (it adds the
   keyboard/touch-button/aggregator drivers), but surface-touch itself is not
   surface-kernel specific and has no dependency on it.
@@ -121,12 +121,13 @@ report mode:
   and selects the heat stream again on the same open node;
 * the digitizer keeps its stream mode across the reset, so `digid`
   carries on without a re-arm;
-* if a node does go away, the processor exits and its service restarts it:
-  the services resolve the node by the device's own HID identity
-  (`045e:0c46`, `045e:0c5d`) and arm the port on the fresh open. The udev
-  rules give the nodes stable symlinks, `/dev/surface-thc-pad` and
-  `/dev/surface-thc-digitizer`, so nothing depends on a hidraw number, which
-  is assigned at enumeration and can differ between boots.
+* if a node does go away, its service stops with it and starts again when
+  the node returns, arming the port on the fresh open. The udev rules find
+  the nodes by the devices' own HID identity (`045e:0c46`, `045e:0c5d`) and
+  give them stable symlinks, `/dev/surface-thc-pad` and
+  `/dev/surface-thc-digitizer`, which the services open, so nothing depends
+  on a hidraw number, which is assigned at enumeration and can differ
+  between boots.
 
 A finger on the glass a second after opening the lid is the normal
 experience. If it is ever not, `systemctl restart surface-heatd` is the whole

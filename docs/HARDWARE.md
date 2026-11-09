@@ -14,8 +14,9 @@ carries ADL-S/ADL-M IDs from the validated tree — untested).
 | `00:10.6` | `8086:51D0` | touchscreen + pen | `045e:0c5d` ("quickspi-hid 045E:0C5D") | `digid` |
 | `00:10.7` | `8086:51D1` | touchpad | `045e:0c46` ("quickspi-hid 045E:0C46") | `heatd` |
 
-Nothing in this package hardcodes those addresses: the resolvers derive the
-BDF from sysfs at start via the HID identity above, never the other way
+Nothing in this package hardcodes those addresses: udev finds the transports
+by the HID identity above and names their nodes; the processors read the PCI
+function from sysfs only to label their virtual devices, never the other way
 round, so the stack follows the hardware wherever the BIOS puts it.
 
 Both ports speak HIDSPI over the Intel Touch Host Controller. Once the pad
@@ -64,12 +65,12 @@ Consequences built into this package:
   `digid` has no re-arm of its own.
 * **Never** open a hard-coded `/dev/hidrawN`: the numbers are assigned at
   enumeration and differ between boots. Use `/dev/surface-thc-pad` /
-  `/dev/surface-thc-digitizer`, or resolve by identity the way
-  `scripts/surface-resolve-hidraw` does.
-* A processor whose node disappears exits and is restarted (by udev on the
-  add event, and by `Restart=always` otherwise). Arming is part of every
-  open, so a restarted processor leaves the same correct state a
-  first-start one does.
+  `/dev/surface-thc-digitizer`.
+* Each service is bound to its node's device unit: it stops when the node
+  disappears and udev starts it again when the node returns
+  (`Restart=always` covers a processor that exits on its own). Arming is
+  part of every open, so a restarted processor leaves the same correct state
+  a first-start one does.
 * Nothing else on the system should pin these node numbers either (custom
   `udev` rules, X/Wayland quirks configs, permissions rules keyed on the
   kernel name). Match on `HID_ID`/`MODALIAS`/the symlink instead.
