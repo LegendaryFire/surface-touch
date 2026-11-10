@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: MIT
 # heatd (touchpad) and digid (touchscreen + pen).
-# See ../docs/DEVELOP.md for how they fit together.
 
 # ---- sources ---------------------------------------------------------------
 

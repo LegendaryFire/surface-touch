@@ -64,8 +64,8 @@ install-files: all
 	$(foreach u,$(UNITS),$(SUBST) systemd/$(u) > $(DESTDIR)$(UNITDIR)/$(u);)
 	install -Dm0644 -t $(DESTDIR)$(UDEVDIR) udev/90-surface-touch.rules
 	install -Dm0644 -t $(DESTDIR)$(MODPROBEDIR) modprobe.d/surface-touch.conf
-	install -Dm0644 -t $(DESTDIR)$(DOCDIR) README.md NOTICE CHANGELOG.md
-	cp -a LICENSES docs $(DESTDIR)$(DOCDIR)/
+	install -Dm0644 -t $(DESTDIR)$(DOCDIR) README.md NOTICE
+	cp -a LICENSES $(DESTDIR)$(DOCDIR)/
 	@# the module sources dkms builds from: a fresh copy, without build output
 	rm -rf $(DESTDIR)$(MODSRCDIR)
 	install -d $(dir $(DESTDIR)$(MODSRCDIR))

@@ -1,175 +1,117 @@
 # surface-touch
 
-Touch input for the **Microsoft Surface Laptop Studio 2** on Linux: touchpad,
-touchscreen and pen, end to end.
+Touchpad, touchscreen and pen support for the Surface Laptop Studio 2 on
+Linux.
 
-The Laptop Studio 2 hangs its touch hardware off two Intel Touch Host
-Controller (THC) SPI functions (`8086:51D0`, `8086:51D1`). The kernel's
-`intel_quickspi` driver does not bind those IDs today, so on a stock kernel
-the touch hardware is inert — and the device streams data the stock stack
-cannot decode even once bound. This package is the complete fix:
+The touch hardware sits on two Intel THC SPI ports that the stock
+`intel_quickspi` driver doesn't bind, and once bound it sends data nothing
+in the kernel decodes. This repo has three parts:
 
-* **`module/`** — the Intel THC kernel driver as a DKMS package, with Raptor
-  Lake-L THC SPI support folded in: it binds both PCI functions at boot.
-* **`heatd`** — the touchpad processor. The pad streams vendor "heat"
-  containers; `heatd` computes contacts from them and exposes a standard
-  precision touchpad (PTP) over `uhid`, which `hid-multitouch` and
-  libinput drive natively: two-finger scroll, pinch, tap, click-to-drag —
-  everything the desktop expects.
-* **`digid`** — the digitizer processor. It arms the touchscreen port,
-  decodes the same container family for touch and pen, and exposes a proper
-  direct-touch MT device and a pen device, again over `uhid`.
-* **udev rules and systemd services** that follow the hardware through
-  suspend/resume automatically (see [Sleep and wake](#sleep-and-wake)).
+- `module/`: the THC driver with support for this machine, built by DKMS.
+- `heatd`: turns the touchpad's raw data into a standard touchpad.
+- `digid`: does the same for the touchscreen and pen.
 
-See [NOTICE](NOTICE) for the provenance of every component.
+Gestures, scrolling and the rest come from the normal Linux stack:
+hid-multitouch, libinput and your desktop.
 
-## What works
+## Status
 
-| Input | State |
-|---|---|
-| Touchpad: pointer, multi-finger gestures, scroll, pinch, tap, click | works, daily-driver quality |
-| Touchscreen: multi-touch, pinch-zoom, five-finger gestures | works |
-| Pen: pointer tracking, hover, tip contact | works — smooth and aligned |
-| Pen: graded pressure | works |
-| Pen: barrel/eraser buttons, tilt | not reported — the wire carries no data for them |
-| Wake on touch, auto-suspend of the ports | not supported (future work) |
+Touchpad, multi-touch touchscreen, pen position and pressure all work, and
+survive suspend. Not supported: pen buttons, eraser and tilt (the hardware
+doesn't send them), and wake on touch.
+
+Only tested on the Surface Laptop Studio 2.
 
 ## Requirements
 
-* Surface Laptop Studio 2 (the only machine this is validated on; the module
-  also carries other Alder Lake THC SPI IDs — untested, see [NOTICE](NOTICE)).
-* Linux 7.2 or 7.3 with matching **kernel headers**; `dkms`, `gcc` 15 or
-  newer, `make`, and **OpenCV ≥ 5** (Arch: `pacman -S dkms opencv`).
-* The `linux-surface` kernel is recommended on a Surface (it adds the
-  keyboard/touch-button/aggregator drivers), but surface-touch itself is not
-  surface-kernel specific and has no dependency on it.
-* **Secure Boot**: DKMS modules here are unsigned. Boot with Secure Boot off,
-  or sign the modules with your own MOK (`dkms` supports `SIGN_MOK`) before
-  enabling it.
+- Linux 7.2 or 7.3 with matching kernel headers
+- dkms, make, GCC 15 or newer, OpenCV 5 (`pacman -S dkms opencv` on Arch)
+- Secure Boot off, or sign the module with your own key; it's unsigned
 
-**Conflicts** — remove or mask these before installing:
-
-* `iptsd` — the old third-party daemon. Its rules and units will race ours.
-* `ithc` — claimed by this package's modprobe configuration
-  (`/etc/modprobe.d/surface-touch.conf`) so it cannot steal the ports.
+Remove `iptsd` if you have it. This package blocks `ithc` from the ports.
 
 ## Install
 
-### Any distribution (manual)
-
-```bash
-make                                   # builds heatd + digid
-sudo make install                      # defaults to PREFIX=/usr/local
-# packaging installs (files under /usr, udev/modprobe in /usr/lib):
-# sudo make install PREFIX=/usr UDEVDIR=/usr/lib/udev/rules.d MODPROBEDIR=/usr/lib/modprobe.d
+```
+make
+sudo make install
 ```
 
-### Arch Linux (native package)
-
-```bash
-make dist                              # → dist/surface-touch-1.0.0.tar.gz
-mkdir -p ../surface-touch-pkg
-cp PKGBUILD surface-touch.install dist/surface-touch-1.0.0.tar.gz ../surface-touch-pkg/
-cd ../surface-touch-pkg && makepkg -si
-```
-
-The PKGBUILD builds the daemons and installs the DKMS module source; the
-module itself is compiled on the target machine by DKMS at package-install
-time, so it follows kernel upgrades.
-
-`make install` installs the binaries, the DKMS module (and builds it for the
-running kernel), the udev rules, the systemd units and the modprobe
-configuration, then reloads udev/systemd. On a kernel update, DKMS rebuilds
-the module automatically via its install hook; if your DKMS lacks hooks, run
-`sudo dkms autoinstall` after upgrading the kernel.
-
-### Verify
-
-```bash
-lspci -nnk -s 00:10.                       # both functions: driver in use: intel_quickspi
-systemctl status surface-heatd.service surface-digid.service   # active (running)
-ls -l /dev/surface-thc-pad /dev/surface-thc-digitizer       # stable symlinks exist
-```
-
-Then touch. The touchpad node the desktop uses is named
-`Surface Heat Processor`, the touchscreen `Surface Digitizer Touch` and the pen
-`Surface Digitizer Pen` (`libinput list-devices | grep -A2 Surface`).
-
-## How it works
+On Arch you can build a package instead:
 
 ```
-  pad (heat stream) ──► /dev/hidrawN (intel_quickspi) ──► heatd ──► uhid "Surface Heat Processor" ──► hid-multitouch ──► libinput
-  digitizer        ──► /dev/hidrawM (intel_quickspi) ──► digid ─► uhid "Surface Digitizer Touch" + "Surface Digitizer Pen"
+make dist
+cp PKGBUILD surface-touch.install dist/surface-touch-*.tar.gz /some/dir
+cd /some/dir && makepkg -si
 ```
 
-The daemons never talk the vendor protocol on the desktop's behalf: they
-translate the vendor stream into standards-compliant HID devices, and the
-ordinary kernel/desktop stack (hid-multitouch, libinput, your compositor)
-does the rest. The stream mode each port is put into is claimed **per
-device open** and released on teardown, so nothing about the hardware stays
-changed when the services stop.
+DKMS rebuilds the module on kernel updates. If it didn't, run
+`sudo dkms autoinstall`.
 
-## Sleep and wake
+To check it works:
 
-On this platform the firmware powers the touch controllers down across
-suspend, so on resume the driver **resets them**. The HID devices and their
-`/dev/hidrawN` nodes stay, but a reset controller comes back in its default
-report mode:
-
-* `heatd` and `digid` notice the resume (or the first report from the
-  default mode) and select their stream again on the same open node;
-* if a node does go away, its service stops with it and starts again when
-  the node returns, arming the port on the fresh open. The udev rules find
-  the nodes by the devices' own HID identity (`045e:0c46`, `045e:0c5d`) and
-  give them stable symlinks, `/dev/surface-thc-pad` and
-  `/dev/surface-thc-digitizer`, which the services open, so nothing depends
-  on a hidraw number, which is assigned at enumeration and can differ
-  between boots.
-
-A finger on the glass a second after opening the lid is the normal
-experience. If it is ever not, `systemctl restart surface-heatd` is the whole
-fix, and `docs/TROUBLESHOOTING.md` has the rest.
-
-## Uninstall
-
-```bash
-sudo make uninstall     # or: pacman -Rns surface-touch, then reboot
+```
+lspci -nnk -s 00:10.        # both ports: driver in use: intel_quickspi
+systemctl status surface-heatd surface-digid
 ```
 
-The ports return to driver-unclaimed after a reboot with nothing else
-installed; nothing else on the machine is touched.
+The desktop sees three devices: `Surface Heat Processor` (touchpad),
+`Surface Digitizer Touch` and `Surface Digitizer Pen`.
 
-## Known limitations
+To remove: `sudo make uninstall` (or `pacman -R surface-touch`), then reboot.
 
-* **Very light pen strokes can miss** — libinput tips a pressure-capable
-  pen at ≥5 % of the pressure range while this device reports the decoded
-  value honestly from 0, so the faintest contacts can register as hover
-  with a tip flag but no click. Decoding pressure from a floor is the
-  honest trade until the threshold behaviour is solved upstream.
-* **Drawn pen curves look slightly faceted** — the controller delivers pen
-  positions at 66.6 Hz and that is the wire's maximum; nothing port-side
-  can raise it.
-* Pen barrel/eraser buttons and tilt are not reported: the wire carries no
-  data for them. They are omitted honestly
-  rather than invented.
-* The digitizer's firmware-provided `Touchscreen`/`Stylus` input nodes go
-  silent while `digid` is armed — that is the mode contract, not a
-  fault: the armed stream *is* the truth, and the uhid devices replace them.
-* A kernel input device named `quickspi-hid 045E:0C46 Touchpad` (and the
-  digitizer firmware nodes) stays visible while the stack runs; it is inert
-  and emits nothing.
+## When something's wrong
 
-## Reporting issues
+- Touch stopped working: `systemctl restart surface-heatd surface-digid`.
+- Ports not bound to `intel_quickspi`: the module didn't build for your
+  kernel. Install the matching headers and run `sudo dkms autoinstall`.
+  `Required key not available` in dmesg means Secure Boot.
+- `ithc` bound instead: `/etc/modprobe.d/surface-touch.conf` is missing.
+  Reinstall and reboot.
+- Touchpad frozen with `-110` timeouts in dmesg: the controller is wedged.
+  Reboot.
 
-Open an issue with the output of `lspci -nnk -s 00:10.`,
-`journalctl -u surface-heatd -u surface-digid -b`, `uname -a` and what you
-expected vs saw.
+When reporting a problem, include `uname -a`, `lspci -nnk -s 00:10.` and
+`journalctl -b -u surface-heatd -u surface-digid`.
+
+## Known issues
+
+- Very light pen strokes may not draw. libinput needs 5% pressure before
+  the pen counts as touching.
+- Pen curves can look slightly angular: the hardware only reports the pen
+  at 66 Hz.
+- The kernel's own touchpad, touchscreen and stylus devices stay listed but
+  do nothing while the services run.
+
+## Development
+
+```
+module/        the THC driver (DKMS)
+src/           heatd and digid
+tools/         heatview, a live view of the touchpad heat map
+udev/          names the devices and starts the services
+systemd/       the two services
+modprobe.d/    keeps ithc off the ports
+```
+
+`make tools` builds `tools/heatview/surface-heatview`. It needs SDL3 and read
+access to the pad (`sudo setfacl -m u:$USER:r /dev/surface-thc-pad`), and
+shows the heat map with what heatd makes of it. `--record FILE` saves the
+frames.
+
+Commits that passed a real session on the machine are tagged
+`hw-validated-<date>`. To see what hasn't been tested on hardware yet:
+
+```
+git diff $(git describe --tags --match 'hw-validated-*' --abbrev=0) -- src/
+```
+
+To release: bump `VERSION`, `PACKAGE_VERSION` in `module/dkms.conf` and
+`pkgver` in the PKGBUILD. Test touchpad, touchscreen, pen and a
+suspend/resume on the machine, tag the commit, then `make dist` and put the
+tarball's checksum in the PKGBUILD.
 
 ## License
 
-* `module/` (kernel): GPL-2.0-only — see [NOTICE](NOTICE) for provenance and
-  `LICENSES/GPL-2.0-only.txt`.
-* `src/` daemons, scripts, rules, units: MIT — `LICENSES/MIT.txt`.
-* `CHANGELOG.md` records releases; `docs/` covers hardware, troubleshooting
-  and development.
+`module/` is GPL-2.0-only, everything else MIT. See `NOTICE` and
+`LICENSES/`.
