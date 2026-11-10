@@ -41,6 +41,7 @@ class HeatEngine final : public Engine {
 
   const std::vector<Blob>& last_blobs() const { return tracker_.blobs(); }
   int region_count() const { return tracker_.region_count(); }
+  const touch::ContactTracker& tracker() const { return tracker_; }
   const std::vector<Track>& last_tracks() const { return tracker_.tracks(); }
   bool button() const override { return button_; }
 

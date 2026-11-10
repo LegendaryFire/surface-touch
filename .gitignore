@@ -2,6 +2,7 @@ build/
 dist/
 src/heatd
 src/digid
+tools/heatview/surface-heatview
 *.o
 *.ko
 *.ko.zst

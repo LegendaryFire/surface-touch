@@ -137,6 +137,8 @@ void ContactTracker::segment(const std::uint8_t* cells) {
   const int nRegion = cv::connectedComponentsWithStats(onMap, regionLab, regionStats,
                                                       regionCentroids, 4, CV_32S) - 1;
   const int* regionp = regionLab.ptr<int>(0);
+  region_of_.resize(std::size_t(N));
+  for (int i = 0; i < N; ++i) region_of_[std::size_t(i)] = regionp[i] - 1;
 
   cv::Mat lab;
   const cv::Mat joinMap = onMap & (cellsMap <= cfg_.core_join);

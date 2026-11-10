@@ -88,6 +88,9 @@ class ContactTracker {
   int region_count() const { return int(regions_.size()); }
   const std::vector<Track>& tracks() const { return tracks_; }
   const std::vector<Retired>& retired() const { return retired_; }
+  const std::vector<std::uint8_t>& on() const { return on_; }
+  // Each cell's index into regions(), or -1 when it is off.
+  const std::vector<int>& region_of() const { return region_of_; }
 
   void mark_all_palm();
 
@@ -106,6 +109,7 @@ class ContactTracker {
   std::vector<std::uint8_t> on_;
   std::vector<Blob> blobs_;
   std::vector<Region> regions_;
+  std::vector<int> region_of_;
   std::vector<Track> tracks_;
   std::vector<Retired> retired_;
   std::uint16_t next_id_ = 1;

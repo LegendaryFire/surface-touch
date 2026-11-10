@@ -6,6 +6,7 @@
 #                        reload udev/systemd
 #   sudo make uninstall  undo install
 #   make dist            source tarball in dist/
+#   make tools           build tools/heatview (needs SDL3; never installed)
 #
 # Packagers set DESTDIR (and usually PREFIX, UDEVDIR, MODPROBEDIR); with
 # DESTDIR set only files are installed, and the package's install hooks do
@@ -43,6 +44,10 @@ all:
 
 clean:
 	$(MAKE) -C src clean
+	$(MAKE) -C tools/heatview clean
+
+tools:
+	$(MAKE) -C tools/heatview
 
 # ---- install ---------------------------------------------------------------
 
@@ -104,4 +109,4 @@ dist: clean
 	    -czf dist/$(NAME)-$(VERSION).tar.gz .
 	@echo "dist/$(NAME)-$(VERSION).tar.gz"
 
-.PHONY: all clean install uninstall install-files uninstall-files register unregister dist
+.PHONY: all clean tools install uninstall install-files uninstall-files register unregister dist
