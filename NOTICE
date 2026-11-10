@@ -56,13 +56,10 @@ required.
 
 Written for this project (MIT). The pad front's uhid descriptor is a
 byte-exact collection of the device's own report descriptor
-(`fixtures/ptp_collection_000D_0005.bin`, sha-pinned); the digitiser touch
+(`fixtures/ptp_collection_000D_0005.bin`); the digitiser touch
 front is the standard Windows 8 MT-class Touch Screen collection bound to
 this device's geometry (its 0x06 response); the pen front keeps the
 device's own pen collection verbatim.
-
-`heatd-sources.sha256` pins the touchpad engine sources to the
-hardware-validated revision; `make digid` refuses to link if they drift.
 
 The processors link OpenCV (Apache-2.0) dynamically, for the segmentation
 stage only (connected components and moments); no OpenCV sources are

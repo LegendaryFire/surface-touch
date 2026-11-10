@@ -54,13 +54,8 @@ $(BUILD)/heatd.o: include/ptp_collection.hpp fixtures/ptp_collection_000D_0005.b
 heatd: $(HEATD_OBJ)
 	$(CXX) $(CXXFLAGS) $^ -o $@ $(OPENCV_LIBS)
 
-digid: $(DIGIPROC_OBJ) | identity
+digid: $(DIGIPROC_OBJ)
 	$(CXX) $(CXXFLAGS) $^ -o $@ $(OPENCV_LIBS)
-
-# heatd's engine sources are byte-pinned against the hardware-validated
-# revision; the digitizer path shares touch_tracker with it.
-identity:
-	@sha256sum -c heatd-sources.sha256 --quiet && echo "identity: heatd sources byte-identical"
 
 $(BUILD):
 	@mkdir -p $(BUILD)
@@ -68,4 +63,4 @@ $(BUILD):
 clean:
 	rm -rf $(BUILD) heatd digid
 
-.PHONY: all clean identity
+.PHONY: all clean

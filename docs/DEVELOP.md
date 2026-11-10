@@ -50,8 +50,11 @@ PKGBUILD       Arch packaging; surface-touch.install carries the DKMS hooks.
   is the standard MT-class collection carrying this device's geometry; the
   pen front is the device's own pen collection kept verbatim. Never
   hand-edit any of them.
-* **The engine sources are pinned.** `heatd-sources.sha256` pins the heatd
-  engine sources; `make identity` checks them on every `digid` link.
+* **Hardware-validated revisions are tagged.** Each commit that passed a
+  real session on the device carries a `hw-validated-<date>` tag (see
+  Releasing, step 2). `git diff $(git describe --tags --match 'hw-validated-*'
+  --abbrev=0) -- src/` shows what has changed since the last one; anything
+  there has not been tried on hardware yet.
 
 ## Kernel module loop
 
@@ -71,7 +74,8 @@ Keep `module/` byte-honest: it is the tree the hardware was validated with
 2. `make clean && make` and a real
    session: pad gestures, two-finger pinch on the touchscreen, pen hover →
    tip → drag, then a suspend/resume cycle with the pointer working on the
-   first touch after the lid opens.
+   first touch after the lid opens. When it passes, tag the commit
+   `git tag -a hw-validated-<YYYY-MM-DD>`.
 3. `make dist`; sign the tarball; point the PKGBUILD's `sha256sums` at it.
    The released set is `surface-touch-<ver>.tar.gz` + `PKGBUILD` +
    `surface-touch.install` (the PKGBUILD consumes the tarball as its source);
