@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Byte-level helpers for the devices' report streams: little-endian field
-// reads from unaligned buffers, and LSB-first bit packing for the uhid
-// fronts' input reports.
+// Little-endian reads and LSB-first bit packing for HID reports.
 #pragma once
 
 #include <endian.h>
@@ -27,8 +25,7 @@ inline std::uint32_t le32(const std::uint8_t* p) {
 
 inline float le_f32(const std::uint8_t* p) { return std::bit_cast<float>(le32(p)); }
 
-// Writes the low n (<= 32) bits of v at bit position `at`, LSB-first, and
-// leaves every other bit of the buffer as it was.
+// Writes the low n bits of v at bit `at`, leaving the other bits alone.
 inline void put_bits(std::uint8_t* p, std::size_t at, std::uint32_t v, unsigned n) {
   for (unsigned i = 0; i < n; ++i) {
     const std::size_t bit = at + i;

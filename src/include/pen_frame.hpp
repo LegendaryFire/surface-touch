@@ -1,20 +1,8 @@
 // SPDX-License-Identifier: MIT
-// Pen-family frame decode for the Surface digitizer port.
-//
-// A pen frame is a container of sections; record-list sections carry typed
-// records. Two kinds of record matter downstream:
-//
-//   * the 0x5B axis profiles — one signal-strength value per sensor column
-//     and per row — which pen_position.hpp turns into a sub-cell position;
-//   * the sub-frame records (0x5F header, 0x5A info, 0x5C signal slots,
-//     0x62 config). The controller splits each pen sub-frame across those
-//     four records; the assembler below joins them back together by mode
-//     and key, and pen_pressure.hpp decodes pressure from the joined
-//     sub-frames.
-//
-// Everything else is either a presence marker (it only sets a bit in
-// Frame::seen) or the 0x57 pen state record, whose timestamp feeds ScanTime.
-// Tilt and the barrel button do not travel on this wire.
+// Decodes the digitizer's pen frames. A frame holds sections of typed
+// records. The ones used are the 0x5B axis profiles (pen position) and the
+// four records each pen sub-frame is split across (pressure). Tilt and the
+// barrel button are not sent.
 #pragma once
 
 #include <array>
@@ -29,13 +17,10 @@ namespace pen {
 using wire::le16;
 using wire::le32;
 
-// --- container grammar -------------------------------------------------------
-//
-// [3]  u16 body length (the body ends at offset 3 + value)
-// [10] first section. Each section: u32 length, kind byte at +5, group byte at
-//      +8. A record-list section (kind 0xFF) holds records from +19 on.
-// Record: u8 type, u8 group, u16 body length, then the body. Type 0xFF ends
-// the list; types at or above kMaxRecordType are malformed.
+// [3]  u16 body length, counted from offset 3
+// [10] sections: u32 length, kind at +5, group at +8; kind 0xFF holds
+//      records from +19
+// Record: u8 type, u8 group, u16 body length, body. Type 0xFF ends a list.
 inline constexpr std::size_t kOffBodyLen = 3;
 inline constexpr std::size_t kOffSections = 10;
 inline constexpr std::size_t kSecOffKind = 5;
@@ -51,8 +36,8 @@ inline constexpr std::uint8_t kRecordEnd = 0xFF;
 struct Record {
   std::uint8_t type;
   std::uint8_t group;
-  std::uint16_t len;        // body length
-  const std::uint8_t* rec;  // record start; the body is rec[4 .. 4 + len)
+  std::uint16_t len;
+  const std::uint8_t* rec;
   const std::uint8_t* body() const { return rec + kRecordHeader; }
 };
 
@@ -61,10 +46,7 @@ enum class Fail {
   NoEnd,
 };
 
-// Walks the container: on_section(kind, group, base, len) per section and
-// on_record(Record) per record of each record list, the end record included.
-// Fail::None only when every section and list closes exactly at its stated
-// length.
+// Calls on_section for each section and on_record for each record.
 template <class OnSection, class OnRecord>
 inline Fail walk_container(const std::uint8_t* buf, std::size_t n,
                            OnSection&& on_section, OnRecord&& on_record) {
@@ -99,25 +81,22 @@ inline Fail walk_container(const std::uint8_t* buf, std::size_t n,
   return sec == body_end ? Fail::None : Fail::Section;
 }
 
-// --- record types ------------------------------------------------------------
-// The four parts of a sub-frame:
-inline constexpr std::uint8_t kRecSubframeHeader = 0x5F;  // mode, key, timestamp
-inline constexpr std::uint8_t kRecSubframeInfo = 0x5A;    // not decoded
-inline constexpr std::uint8_t kRecSignalSlots = 0x5C;     // per-slot I/Q bins
-inline constexpr std::uint8_t kRecSubframeConfig = 0x62;  // pressure encoding
-// Frame-level records:
-inline constexpr std::uint8_t kRecPenState = 0x57;     // timestamp (ScanTime)
-inline constexpr std::uint8_t kRecAxisProfiles = 0x5B;  // column/row profiles
+// The four parts of a sub-frame.
+inline constexpr std::uint8_t kRecSubframeHeader = 0x5F;
+inline constexpr std::uint8_t kRecSubframeInfo = 0x5A;
+inline constexpr std::uint8_t kRecSignalSlots = 0x5C;
+inline constexpr std::uint8_t kRecSubframeConfig = 0x62;
+
+inline constexpr std::uint8_t kRecPenState = 0x57;
+inline constexpr std::uint8_t kRecAxisProfiles = 0x5B;
 inline constexpr std::uint8_t kRecTick = 0x63;
-// Presence markers: only their arrival is recorded (Frame::seen).
+// Only whether these arrived matters.
 inline constexpr std::uint8_t kRec58 = 0x58;
 inline constexpr std::uint8_t kRec59 = 0x59;
 inline constexpr std::uint8_t kRec5D = 0x5D;
 inline constexpr std::uint8_t kRec5E = 0x5E;
 inline constexpr std::uint8_t kRec80 = 0x80;
 
-// Body lengths a record must have to be accepted; anything else is counted
-// in Frame::rejected and dropped.
 inline constexpr std::uint16_t kLenSubframeHeader = 0x10;
 inline constexpr std::uint16_t kLenSubframeInfo = 0x94;
 inline constexpr std::uint16_t kLenSubframeConfig = 0x10;
@@ -125,7 +104,6 @@ inline constexpr std::uint16_t kLenPenState = 0x40;
 inline constexpr std::uint16_t kLen59 = 0x40;
 inline constexpr std::uint16_t kLenTick = 4;
 
-// Frame::seen bits, one per presence-marker record type.
 inline constexpr std::uint32_t kSeenPenState = 0x01;
 inline constexpr std::uint32_t kSeen58or80 = 0x02;
 inline constexpr std::uint32_t kSeen59 = 0x04;
@@ -133,11 +111,8 @@ inline constexpr std::uint32_t kSeenAxisProfiles = 0x10;
 inline constexpr std::uint32_t kSeen5D = 0x40;
 inline constexpr std::uint32_t kSeen5E = 0x80;
 
-// --- sub-frames --------------------------------------------------------------
-//
-// Sub-frame modes 6..11. Mode 6 arrives in report 0x0C alongside the axis
-// profiles; mode 11 carries the pressure data symbols (report 0x0D); 7 and 8
-// arrive in report 0x0B; 9 and 10 in the 0x1A scene containers.
+// Sub-frame modes: 6 arrives with the axis profiles (report 0x0C), 7 and 8
+// in 0x0B, 9 and 10 in 0x1A scene frames, and 11 carries pressure (0x0D).
 inline constexpr std::uint8_t kModeFirst = 6;
 inline constexpr std::uint8_t kModeLast = 11;
 inline constexpr std::uint8_t kModePressure = 11;
@@ -146,8 +121,7 @@ inline bool mode_known(std::uint8_t mode) {
   return mode >= kModeFirst && mode <= kModeLast;
 }
 
-// Marker records a sub-frame of the given mode needs in the same frame before
-// it is released (all bits of the mask must be in Frame::seen).
+// Records that must arrive in the same frame before a sub-frame is used.
 inline std::uint32_t required_markers(std::uint8_t mode) {
   switch (mode) {
     case 6: return kSeenPenState | kSeen58or80 | kSeenAxisProfiles | kSeen5E;
@@ -157,14 +131,13 @@ inline std::uint32_t required_markers(std::uint8_t mode) {
   }
 }
 
-// One I/Q signal slot: `level` is the slot's overall signal level (used for
-// the coarse pressure reference), i/q the nine frequency bins.
+// One signal slot: its overall level and nine I/Q frequency bins.
 inline constexpr std::size_t kSlotBytes = 48;
 inline constexpr int kBins = 9;
 struct Slot {
-  std::uint32_t level = 0;              // +0x04
-  std::array<std::int16_t, kBins> i{};  // +0x08
-  std::array<std::int16_t, kBins> q{};  // +0x1A
+  std::uint32_t level = 0;
+  std::array<std::int16_t, kBins> i{};
+  std::array<std::int16_t, kBins> q{};
 };
 inline Slot read_slot(const std::uint8_t* s) {
   Slot o;
@@ -176,14 +149,13 @@ inline Slot read_slot(const std::uint8_t* s) {
   return o;
 }
 
-// Signal-slot record body: count at +4, key at +5, mode at +9, then two slot
-// arrays of `count` slots each from +12.
+// 0x5C body: count at +4, key at +5, mode at +9, then two arrays of `count`
+// slots from +12.
 inline constexpr std::size_t kSlotsArrays = 12;
 inline std::uint16_t signal_slots_len(unsigned count) {
   return std::uint16_t(2 * kSlotBytes * count + kSlotsArrays);
 }
 
-// Which of the four parts a sub-frame has received.
 inline constexpr std::uint8_t kPartHeader = 1 << 0;
 inline constexpr std::uint8_t kPartInfo = 1 << 1;
 inline constexpr std::uint8_t kPartSlots = 1 << 2;
@@ -193,19 +165,17 @@ inline constexpr std::uint8_t kAllParts =
 
 struct SubFrame {
   std::uint8_t parts = 0;
-  std::uint8_t mode = 0, key = 0;  // from the header
-  std::uint32_t timestamp = 0;     // from the header
-  std::vector<Slot> first;         // the two slot arrays of the 0x5C record
+  std::uint8_t mode = 0, key = 0;
+  std::uint32_t timestamp = 0;
+  std::vector<Slot> first;
   std::vector<Slot> second;
-  bool absolute_pressure = false;  // config: pressure is sent absolute
+  bool absolute_pressure = false;
   bool complete() const { return parts == kAllParts; }
 };
 
-// --- axis profiles (0x5B) ----------------------------------------------------
-//
-// Body: [0..1] the controller's peak cell (column, row), [2..3] its refined
-// cell, then one u32 per column and per row from +8. A half-length variant
-// exists (half the cells per axis); its vectors are left empty.
+// 0x5B body: peak cell (col, row), refined cell, then one u32 signal per
+// column and per row from +8. A half-length variant is recognised but not
+// decoded.
 inline constexpr std::size_t kDimCols = 78;
 inline constexpr std::size_t kDimRows = 52;
 inline constexpr std::size_t kOffProfileCells = 8;
@@ -214,8 +184,8 @@ struct Profile {
   std::uint8_t peak_col = 0, peak_row = 0;
   std::uint8_t refined_col = 0, refined_row = 0;  // 0xFF: none
   bool half = false;
-  std::vector<std::uint32_t> col;  // kDimCols values
-  std::vector<std::uint32_t> row;  // kDimRows values
+  std::vector<std::uint32_t> col;
+  std::vector<std::uint32_t> row;
   bool full() const { return !half && !col.empty() && !row.empty(); }
 };
 
@@ -239,27 +209,20 @@ inline bool parse_profiles(const Record& r, Profile& out) {
   return false;
 }
 
-// --- one decoded frame -------------------------------------------------------
 struct Frame {
   Fail fail = Fail::None;
-  std::uint32_t seen = 0;           // kSeen* bits of the markers that arrived
-  unsigned rejected = 0;            // records dropped by a length/field check
-  bool tick = false;                // 0x63 tick record with flag 1
+  std::uint32_t seen = 0;
+  unsigned rejected = 0;
+  bool tick = false;
   bool have_pen_state = false;
-  std::uint32_t pen_timestamp = 0;  // 0x57 body+0
+  std::uint32_t pen_timestamp = 0;
   bool have_profile = false;
   Profile profile;
-  std::vector<SubFrame> released;   // completed sub-frames, in release order
-  bool held_incomplete = false;     // release stopped on a missing marker
+  std::vector<SubFrame> released;
+  bool held_incomplete = false;
 };
 
-// --- assembler ---------------------------------------------------------------
-//
-// Joins sub-frame parts by (mode, key) into one of seven pending slots and,
-// once the frame is walked, releases the complete ones lowest slot first.
-// Release stops at the first complete sub-frame whose required markers did
-// not arrive in this frame. Pending slots are cleared every frame; the
-// mode-10 key tracking persists across frames.
+// Joins each frame's sub-frame parts back together by mode and key.
 class Assembler {
  public:
   Frame decode(const std::uint8_t* buf, std::size_t n) {
@@ -289,10 +252,8 @@ class Assembler {
  private:
   static constexpr unsigned kSlots = 7;
 
-  // Pending slot for a sub-frame part, or nullptr for an unknown mode. Mode 10
-  // sub-frames come in two keyed streams: the first mode-10 key after a mode-6
-  // header opens slot 3, and later mode-10 parts with another key go to
-  // slot 4.
+  // Mode 10 comes in two streams: the first key after a mode-6 header is one,
+  // any other key the second.
   SubFrame* slot_for(std::uint8_t mode, std::uint8_t key) {
     switch (mode) {
       case 6: expect_mode10_key_ = true; return &pending_[0];
@@ -327,7 +288,6 @@ class Assembler {
       }
       case kRecSubframeInfo: {
         if (r.len != kLenSubframeInfo) { ++f.rejected; return; }
-        // Mode and key sit at the end of the body.
         SubFrame* s = slot_for(b[0x91], b[0x92]);
         if (!s) { ++f.rejected; return; }
         s->parts |= kPartInfo;
@@ -381,7 +341,7 @@ class Assembler {
         if (r.len != kLenTick) { ++f.rejected; return; }
         f.tick = b[0] == 1;
         return;
-      default: return;  // status, end and pen-link records carry nothing used
+      default: return;
     }
   }
 

@@ -41,7 +41,7 @@ std::vector<Contact> DigiEngine::process(const std::uint8_t* cells, bool pen_nea
   return out;
 }
 
-// Himetric in, himetric out: rounded and clamped to the device extent.
+// Rounded and clamped to the screen.
 Contact DigiEngine::to_contact(double x, double y, std::uint8_t wire, bool palm,
                                bool in_contact) const {
   const std::int64_t hx = std::llround(x), hy = std::llround(y);

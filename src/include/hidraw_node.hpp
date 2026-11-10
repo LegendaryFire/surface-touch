@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Facts about a hidraw node: its HID identity (from the node itself) and
-// the PCI function it sits on (from sysfs). The node may be given through a
-// udev symlink such as /dev/surface-thc-pad.
+// A hidraw node's HID identity and the PCI function it belongs to.
 #pragma once
 
 #include <linux/hidraw.h>
@@ -19,15 +17,13 @@ struct Identity {
   std::uint16_t vendor = 0, product = 0;
 };
 
-// HIDIOCGRAWINFO on an open node.
 inline std::optional<Identity> identity(int fd) {
   hidraw_devinfo info{};
   if (::ioctl(fd, HIDIOCGRAWINFO, &info) < 0) return std::nullopt;
   return Identity{std::uint16_t(info.vendor), std::uint16_t(info.product)};
 }
 
-// The PCI function the node's device hangs off ("0000:00:10.6"): the
-// innermost PCI address in its sysfs path. Empty if there is none.
+// "0000:00:10.6", or empty if the node is not on PCI.
 inline std::string pci_function(const std::string& node) {
   namespace fs = std::filesystem;
   std::error_code ec;

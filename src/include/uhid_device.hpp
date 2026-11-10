@@ -1,8 +1,5 @@
 // SPDX-License-Identifier: MIT
-// A host-side virtual HID device over /dev/uhid: created from a report
-// descriptor, fed input reports, and answering the kernel's report
-// requests. heatd's pad front and digid's touch and pen fronts are each
-// one of these.
+// A virtual HID device over /dev/uhid.
 #pragma once
 
 #include <fcntl.h>

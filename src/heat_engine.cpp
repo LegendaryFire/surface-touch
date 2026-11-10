@@ -21,7 +21,7 @@ touch::SensorConfig sensor(const DeviceConfig& c) {
   return s;
 }
 
-// Himetric -> PTP logical 0..4095.
+// 0.01 mm to 0..4095.
 std::pair<std::uint16_t, std::uint16_t> to_ptp_xy(double x, double y,
                                                   const DeviceConfig& cfg) {
   const std::int64_t hx = std::int64_t(x), hy = std::int64_t(y);

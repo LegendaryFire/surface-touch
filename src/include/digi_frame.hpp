@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
-// Container contract for the Surface digitizer object container 0x1A.
+// The digitizer's touch frames: 4350-byte reports, id 0x1A. A frame is
+// either a cell matrix or a scene frame without one.
 #pragma once
 
 #include <cstddef>
@@ -10,58 +11,48 @@
 
 namespace digi {
 
-// Fixed 4350-byte containers, id 0x1A (declared == wire).
 inline constexpr std::size_t kWireSize = 4350;
 inline constexpr std::uint8_t kReportId = 0x1A;
 
-// Header anchors.
-inline constexpr std::size_t kOffTs16 = 1;          // LE, 0.1 ms (the pad's unit)
+inline constexpr std::size_t kOffTs16 = 1;  // 0.1 ms units
 inline constexpr std::size_t kOffClass = 3;
 inline constexpr std::size_t kOffSecLen = 10;
 inline constexpr std::size_t kOffMatrixLen = 22;
 inline constexpr std::size_t kOffCells = 26;
-inline constexpr std::uint16_t kClassMatrix = 0x1082;  // all 2550 matrix frames
-inline constexpr std::uint16_t kClassScene = 0x10F2;   // all 1698 scene frames
+inline constexpr std::uint16_t kClassMatrix = 0x1082;
+inline constexpr std::uint16_t kClassScene = 0x10F2;
 inline constexpr std::uint32_t kSecLenMatrix = 4072;
 inline constexpr std::uint32_t kSecLenScene = 4331;
-inline constexpr std::uint32_t kMatrixCells = 4056;    // 78 x 52
+inline constexpr std::uint32_t kMatrixCells = 4056;  // 78 x 52
 
-// Geometry from the device's 0x06 DeviceParameters (rows@15=52, cols@19=78):
 // 3.891 mm square cells over 303.48 x 202.32 mm.
 inline constexpr unsigned kCols = 78;
 inline constexpr unsigned kRows = 52;
 
-// Tail (268 B) = the group-4 record-list section that follows the matrix.
-// kOffStateA/B are entries 2 and 15 of its type-0x04 record's 16-entry array
-// (a firmware value). The bytes are kept in full; nothing reads them for
-// meaning yet.
-inline constexpr std::size_t kOffTail = kOffCells + kMatrixCells;  // 4082
-inline constexpr std::size_t kWireTailEnd = kWireSize;             // 4350
-inline constexpr std::size_t kOffStateA = 0x102D;   // type-0x04 entry 2
-inline constexpr std::size_t kOffStateB = 0x1061;   // type-0x04 entry 15
+// After the matrix: 268 bytes of firmware state, not decoded.
+inline constexpr std::size_t kOffTail = kOffCells + kMatrixCells;
+inline constexpr std::size_t kWireTailEnd = kWireSize;
+inline constexpr std::size_t kOffStateA = 0x102D;
+inline constexpr std::size_t kOffStateB = 0x1061;
 
-// Cell semantics: idle 0xB4 (the same gate value as the pad), touch darkens.
-// The decode threshold is the band in digi::DeviceConfig, derived from this
-// device's 0x06 block 0.
+// Idle cells read 0xB4; a finger pulls them down.
 inline constexpr std::uint8_t kCellIdle = 0xB4;
 
 enum class Fail { None, ShortRead, ReportId, Class, SecLen, MatrixLen };
 
 struct Frame {
-  std::uint16_t ts16;          // 0.1 ms
-  bool matrix;                 // class: true = matrix, false = scene
-  std::uint32_t sec_len;       // validated to the class constant
-  const std::uint8_t* cells;   // matrix: 4056 cells @26; scene: nullptr
-  const std::uint8_t* tail;    // 268 B @4082 (both classes)
-  std::uint8_t state_a;        // raw (entry 2 low byte)
-  std::uint8_t state_b;        // raw (entry 15 low byte)
+  std::uint16_t ts16;
+  bool matrix;
+  std::uint32_t sec_len;
+  const std::uint8_t* cells;  // nullptr in a scene frame
+  const std::uint8_t* tail;
+  std::uint8_t state_a;
+  std::uint8_t state_b;
 };
 
 using wire::le16;
 using wire::le32;
 
-// Every anchor must match for the class its class tag declares; a mismatch
-// rejects the whole frame.
 inline std::optional<Frame> parse_container(const std::uint8_t* buf,
                                             std::size_t n,
                                             Fail* why = nullptr) {

@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: MIT
-// The pad front's report descriptor: fixtures/ptp_collection_000D_0005.bin,
-// a byte-exact slice of the device's own report descriptor, embedded at
-// compile time so the front can never drift from it.
+// The virtual touchpad's report descriptor: the touchpad collection copied
+// byte for byte from the device's own descriptor.
 #pragma once
 
 #include <cstddef>
@@ -10,7 +9,7 @@
 namespace ptp {
 
 #pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wc++26-extensions"  // #embed is standard from C++26
+#pragma GCC diagnostic ignored "-Wc++26-extensions"
 inline constexpr std::uint8_t collection[] = {
 #embed "../fixtures/ptp_collection_000D_0005.bin"
 };

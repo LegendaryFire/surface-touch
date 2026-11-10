@@ -1,15 +1,8 @@
 // SPDX-License-Identifier: MIT
-// Re-arms a device's stream mode after the device resets.
-//
-// The driver resets both touch controllers on every resume (the firmware
-// asserts their reset lines across suspend), and a controller can also reset
-// on its own. Either way it comes back in its default report mode while the
-// hidraw node stays open, so nothing tells the processor; it has to notice.
-// Triggers:
-//   * on_tick: a suspend observed between loop passes;
-//   * on_default_report: a report only the default mode sends.
-// One arm per trigger; in-band arms at most once a second, and a failed arm
-// blocks the in-band trigger until the next resume.
+// Re-arms a device's stream after the device resets. A reset device comes
+// back in its default mode with the hidraw node still open, so the reset has
+// to be noticed: after a suspend, or from a report only the default mode
+// sends.
 #pragma once
 
 #include <sys/types.h>
@@ -34,8 +27,7 @@ inline std::int64_t suspended_ns() {
 
 class Guard {
  public:
-  // `name` prefixes the log lines; `arm` selects the stream mode and returns
-  // whether the device accepted it.
+  // `arm` returns whether the device accepted the stream mode.
   Guard(const char* name, std::function<bool()> arm)
       : name_(name), arm_(std::move(arm)) {}
 

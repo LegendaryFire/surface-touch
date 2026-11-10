@@ -1,9 +1,6 @@
 // SPDX-License-Identifier: MIT
-// heatd — touch processor for the Surface Laptop Studio 2 pad.
-//
-// Reads heat frames from the pad's hidraw node, runs the contact engine,
-// and presents the contacts as a PTP touchpad over uhid, using a collection
-// of the device's own report descriptor.
+// heatd: reads the touchpad's heat frames and presents the contacts as a
+// standard touchpad.
 #include <fcntl.h>
 #include <getopt.h>
 #include <linux/hidraw.h>
@@ -47,11 +44,9 @@ using Clock = std::chrono::steady_clock;
 
 struct Options {
   const char* hidraw = nullptr;
-  const char* device_params = nullptr;  // saved 0x06 response
+  const char* device_params = nullptr;
   const char* engine = "heat";
   bool print_descriptor = false;
-  // Microsoft vendor id with a product id distinct from the physical pad's
-  // 0x0C46, so the front never shadows it.
   unsigned vendor = 0x045E;
   unsigned product = 0x4C46;
 };
@@ -59,12 +54,10 @@ struct Options {
 volatile sig_atomic_t g_stop = 0;
 void on_stop(int) { g_stop = 1; }
 
-// ---- front: report sizes derived from the descriptor fixture ----
-
 struct Front {
   std::map<std::uint16_t, heat::ReportBits> bits;
-  std::uint16_t input_0x81_bytes = 0;  // payload bytes, id byte excluded
-  std::uint8_t contact_max = 0;        // TipSwitch count in report 0x81
+  std::uint16_t input_0x81_bytes = 0;
+  std::uint8_t contact_max = 0;
 };
 
 Front front_from_fixture() {
@@ -80,7 +73,7 @@ Front front_from_fixture() {
   return f;
 }
 
-// GET_REPORT reply: zeros of the declared size, except 0x82 (contact max).
+// Zeros of the declared size, except the contact count in 0x82.
 std::vector<std::uint8_t> feature_reply(std::uint16_t rid, const Front& f) {
   auto it = f.bits.find(rid);
   const std::uint32_t bytes = it == f.bits.end() ? 0 : (it->second.feature + 7) / 8;
@@ -88,8 +81,6 @@ std::vector<std::uint8_t> feature_reply(std::uint16_t rid, const Front& f) {
   if (rid == 0x82 && !v.empty()) v[0] = f.contact_max;
   return v;
 }
-
-// ---- calibration and engine ----
 
 heat::DeviceConfig config_from_file(const char* path) {
   std::ifstream in(path, std::ios::binary);
@@ -125,14 +116,12 @@ std::unique_ptr<heat::Engine> make_engine(const Options& opt,
   std::exit(2);
 }
 
-// ---- per-frame pipeline ----
-
 struct Counters {
   unsigned long frames = 0;
   unsigned long invalid = 0;
   unsigned long short_reads = 0;
   unsigned long lost = 0;  // frames implied missing by ts16 gaps
-  unsigned long btn = 0;   // frames with the pad pressed
+  unsigned long btn = 0;
 };
 
 class Pipeline {
@@ -141,9 +130,7 @@ class Pipeline {
       : engine_(std::move(engine)),
         heat_(dynamic_cast<heat::HeatEngine*>(engine_.get())) {}
 
-  // Parses one frame and runs the engine. Returns the frame's contacts with
-  // the engine's release entries appended (up to kMaxContacts), or nothing
-  // for an invalid frame.
+  // The frame's contacts followed by its lifts; nothing for a bad frame.
   std::optional<std::vector<heat::Contact>> step(const std::uint8_t* buf,
                                                  std::size_t n) {
     heat::Fail why = heat::Fail::None;
@@ -169,15 +156,13 @@ class Pipeline {
 
   Counters count;
   heat::Fail last_fail = heat::Fail::None;
-  std::uint16_t ts16 = 0;  // of the last valid frame
+  std::uint16_t ts16 = 0;
 
  private:
   std::unique_ptr<heat::Engine> engine_;
   heat::HeatEngine* heat_;
   bool have_ts_ = false;
 };
-
-// ---- uhid front ----
 
 uhid::DeviceSpec front_spec(const Options& opt, const Front& f) {
   uhid::DeviceSpec spec;
@@ -197,9 +182,8 @@ bool send_0x81(uhid::Device& front, const Front& f, std::uint16_t ts,
   return front.send_input(0x81, rep.data(), rep.size());
 }
 
-// Sends the frame's report when the front is up. A frame with no contacts is
-// sent once, right after the last one that had some: it ends the kernel's
-// pointer emulation, which release entries alone do not.
+// One empty report follows the last contact: lift reports alone don't end the
+// kernel's pointer emulation.
 bool emit(uhid::Device& front, const Front& f, std::uint16_t ts,
           const std::vector<heat::Contact>& contacts, bool button, bool& prev_nonempty) {
   bool sent = false;
@@ -209,12 +193,9 @@ bool emit(uhid::Device& front, const Front& f, std::uint16_t ts,
   return sent;
 }
 
-// ---- --hidraw: the live pad ----
-
-// Reads the device's own calibration (feature report 0x06). Runs before the
-// stream is enabled, so the read cannot interleave with input reports.
+// Runs before the stream is armed, so no input reports get in the way.
 bool read_device_params(int hdev, heat::DeviceConfig* cfg) {
-  std::uint8_t buf[120] = {0x06};  // byte 0 selects the report
+  std::uint8_t buf[120] = {0x06};
   if (::ioctl(hdev, HIDIOCGFEATURE(sizeof(buf)), buf) < 0) {
     std::fprintf(stderr, "heatd: GET_FEATURE 0x06: %s — keeping built-in\n",
                  std::strerror(errno));
@@ -231,8 +212,7 @@ bool read_device_params(int hdev, heat::DeviceConfig* cfg) {
   return true;
 }
 
-// Switches the pad from boot-mouse reports to the heat stream (feature 0x05
-// = 1). The mode is not kept across opens, so this runs on every start.
+// Switches the pad from boot-mouse reports to heat frames.
 bool enable_heat_stream(int hdev) {
   std::uint8_t buf[2] = {0x05, 0x01};
   if (::ioctl(hdev, HIDIOCSFEATURE(sizeof(buf)), buf) < 0) {
@@ -245,7 +225,6 @@ bool enable_heat_stream(int hdev) {
   return true;
 }
 
-// "pci-<function>/heatd": the front's phys names the PCI function it serves.
 std::string phys_for(const char* hidraw) {
   const std::string function = hidraw::pci_function(hidraw);
   return function.empty() ? std::string() : "pci-" + function + "/heatd";
@@ -257,7 +236,6 @@ int run_live(const Options& opt, const Front& f) {
     std::fprintf(stderr, "heatd: open %s: %s\n", opt.hidraw, std::strerror(errno));
     return 2;
   }
-  // Calibration: saved file, else the live 0x06 read, else the defaults.
   heat::DeviceConfig cfg{};
   const char* cfg_src = "built-in defaults";
   if (opt.device_params) {
@@ -288,8 +266,6 @@ int run_live(const Options& opt, const Front& f) {
                  "contacts=%lu sent=%lu ",
                  c.frames, c.invalid, c.short_reads, c.lost, contacts_total, sent);
   };
-  // The 200 ms select timeout keeps the 2 s heartbeat going when the stream
-  // is dead.
   auto next_beat = Clock::now();
   while (!g_stop) {
     fd_set rfds;
@@ -377,7 +353,7 @@ int main(int argc, char** argv) {
       case kProduct: opt.product = number(); break;
       case kPrintDescriptor: opt.print_descriptor = true; break;
       case 'h': usage(argv[0]); return 0;
-      default: usage(argv[0]); return 2;  // getopt_long has named the problem
+      default: usage(argv[0]); return 2;
     }
   }
   if (optind < argc) {

@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: MIT
-// Contact pipeline shared by the pad (heatd) and the digitizer (digid):
-// per-cell hysteresis, core-seeded blob segmentation, palm classification,
-// and Kalman/Hungarian tracking with a fixed pool of wire ids.
+// Finds and tracks contacts in a frame of sensor cells. Shared by the
+// touchpad and the touchscreen.
 #pragma once
 
 #include <cstdint>
@@ -11,37 +10,31 @@ namespace cv { class Mat; }
 
 namespace touch {
 
-// Grid geometry and the thresholds the pipeline runs on. Raw cells sit at
-// baseline when idle and drop below it under a finger.
+// Idle cells sit at baseline and drop below it under a finger.
 struct SensorConfig {
   int rows = 0;
   int cols = 0;
-  std::uint32_t him_w = 0;  // sensor extent, himetric 0.01 mm
+  std::uint32_t him_w = 0;  // 0.01 mm
   std::uint32_t him_h = 0;
-  std::uint8_t gate_lo = 0;     // a cell turns ON below this
-  std::uint8_t gate = 0;        // an ON cell turns OFF at or above this
-  std::uint8_t baseline = 0;    // blob weight = baseline - cell
-  std::uint8_t spawn_gate = 0;  // ON cells at or below this are cores
-  std::uint8_t core_join = 0;   // cores connected through cells at or below
-                                // this are one seed (>= spawn_gate)
-  // Palm rejection: a region whose ON area per core reaches this is a palm.
-  // Fingers held together share a region but bring a core each, so their
-  // area per core stays fingertip-sized; a palm spreads few cores over a
-  // large area. 0 disables.
+  std::uint8_t gate_lo = 0;     // a cell turns on below this
+  std::uint8_t gate = 0;        // and off again at or above this
+  std::uint8_t baseline = 0;
+  std::uint8_t spawn_gate = 0;  // on cells at or below this start a contact
+  std::uint8_t core_join = 0;   // cores joined through cells this strong are one
+  // A region with at least this much area per contact is a palm. Fingers held
+  // together still bring one core each. 0 turns it off.
   double palm_mm2_per_core = 0;
 };
 
-// One 4-connected area of ON cells. Blobs grow inside regions, so every blob
-// belongs to exactly one.
+// A connected area of on cells.
 struct Region {
   int cells = 0;
-  int width = 0, height = 0;  // bounding box, cells
-  int cores = 0;              // blobs grown in this region
+  int width = 0, height = 0;
+  int cores = 0;
   double area_mm2 = 0;
   bool palm = false;
 };
 
-// One segmented blob: weighted raw moments and the equivalent ellipse.
 struct Blob {
   double m00 = 0;  // sum(w)
   double m10 = 0;  // sum(w*col)
@@ -49,37 +42,34 @@ struct Blob {
   double m20 = 0;  // sum(w*col*col)
   double m02 = 0;  // sum(w*row*row)
   double m11 = 0;  // sum(w*col*row)
-  double cx = 0, cy = 0;              // centroid, cell units
-  std::uint8_t min_cell = 255;        // strongest (lowest) raw cell
-  double ax_major = 0, ax_minor = 0;  // ellipse semi-axes, cell units
-  int orient_cdeg = 0;                // orientation, hundredths of a degree
-  int ext_a = 0, ext_b = 0;           // full axis lengths, cells (rounded)
-  int cells_on = 0;                   // cells in the blob
-  int region = -1;                    // index into ContactTracker::regions()
-  bool palm = false;                  // its region is a palm
+  double cx = 0, cy = 0;              // cells
+  std::uint8_t min_cell = 255;
+  double ax_major = 0, ax_minor = 0;  // cells
+  int orient_cdeg = 0;                // 0.01 degree
+  int ext_a = 0, ext_b = 0;
+  int cells_on = 0;
+  int region = -1;
+  bool palm = false;
 };
 
-// One axis of a constant-velocity Kalman filter: state [p v], measurement p,
-// dt = 1 frame, white-acceleration process noise. The x/y filter has no
-// cross-axis terms, so two of these are exactly the 4-state filter.
+// One axis of a constant-velocity Kalman filter.
 struct KalmanAxis {
-  double p = 0, v = 0;            // position (himetric), velocity (per frame)
-  double pp = 0, pv = 0, vv = 0;  // state covariance, symmetric 2x2
+  double p = 0, v = 0;
+  double pp = 0, pv = 0, vv = 0;
 };
 
 struct Track {
-  std::uint16_t id = 0;     // rolling id, starts at 1
-  double x = 0, y = 0;      // position at the last match, himetric
-  double vx = 0, vy = 0;    // filter velocity, himetric per frame
-  int age = 0;              // frames since spawn
-  int miss = 0;             // frames since the last match
+  std::uint16_t id = 0;
+  double x = 0, y = 0;    // 0.01 mm
+  double vx = 0, vy = 0;  // 0.01 mm per frame
+  int age = 0;   // frames since spawn
+  int miss = 0;  // frames since the last match
   bool alive = false;
-  std::uint8_t wire = 0xFF;  // contact id on the wire, fixed for life
-  bool palm = false;         // once set, kept until the track retires
+  std::uint8_t wire = 0xFF;  // the contact id reported to the host
+  bool palm = false;         // stays set until the contact lifts
   KalmanAxis kx, ky;
 };
 
-// A track retired by the last process() call, at its last position.
 struct Retired {
   double x = 0, y = 0;
   std::uint8_t wire = 0;
@@ -90,7 +80,7 @@ class ContactTracker {
  public:
   ContactTracker(const SensorConfig& cfg, int wire_ids);
 
-  // One frame of rows*cols raw cells, row-major.
+  // rows * cols cells, row by row.
   void process(const std::uint8_t* cells);
 
   const std::vector<Blob>& blobs() const { return blobs_; }
@@ -99,8 +89,6 @@ class ContactTracker {
   const std::vector<Track>& tracks() const { return tracks_; }
   const std::vector<Retired>& retired() const { return retired_; }
 
-  // Marks every live track a palm; like a region-based palm, it stays one
-  // until the track retires.
   void mark_all_palm();
 
  private:
@@ -115,7 +103,7 @@ class ContactTracker {
   SensorConfig cfg_;
   int wire_ids_;
   std::uint32_t wire_free_;
-  std::vector<std::uint8_t> on_;  // per-cell hysteresis state
+  std::vector<std::uint8_t> on_;
   std::vector<Blob> blobs_;
   std::vector<Region> regions_;
   std::vector<Track> tracks_;

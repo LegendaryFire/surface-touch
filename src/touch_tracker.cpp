@@ -18,16 +18,14 @@ inline double sq(double v) { return v * v; }
 constexpr double kMeasStdCells = 0.3;     // centroid jitter (measurement noise)
 constexpr double kAccelStdCells = 0.5;    // per-frame acceleration (process noise)
 constexpr double kInitVelStdCells = 2.0;  // velocity uncertainty at touch-down
-// A pair is accepted inside the 99% Mahalanobis bound for 2 DOF, or within
-// 400 himetric of the prediction.
+// A blob can match a track inside the 99% bound of the prediction, or
+// within 4 mm of it.
 constexpr double kGateChi2 = 9.21;
 constexpr double kGateFloorD2 = 160000.0;
-// Cost of a gated-out pair. Larger than any sum of real costs, so the solver
-// always prefers more valid pairs over fewer cheap ones.
+// Larger than any sum of real costs, so more matches always win.
 constexpr double kForbid = 1e12;
 
-// Min-cost assignment (Hungarian / Kuhn-Munkres, O(n^2 m)), n rows <= m cols.
-// cost is row-major n x m. Returns the column assigned to each row.
+// Hungarian assignment for n <= m: the column given to each row.
 std::vector<int> hungarian_rows_le_cols(const std::vector<double>& cost, int n, int m) {
   const double inf = std::numeric_limits<double>::infinity();
   std::vector<double> u(std::size_t(n + 1), 0), v(std::size_t(m + 1), 0);
@@ -64,7 +62,7 @@ std::vector<int> hungarian_rows_le_cols(const std::vector<double>& cost, int n, 
   return col;
 }
 
-// Any shape: returns, for each of the n rows, its column or -1.
+// Any shape: each row's column, or -1.
 std::vector<int> assign(const std::vector<double>& cost, int n, int m) {
   if (n == 0 || m == 0) return std::vector<int>(std::size_t(n), -1);
   if (n <= m) return hungarian_rows_le_cols(cost, n, m);
@@ -78,9 +76,6 @@ std::vector<int> assign(const std::vector<double>& cost, int n, int m) {
   return rowToCol;
 }
 
-// Kalman filter, one axis (see KalmanAxis). qa = acceleration variance
-// (Q = qa * [1/4 1/2; 1/2 1]), r = measurement variance, pv0 = initial
-// velocity variance.
 void kf_init(KalmanAxis& k, double z, double r, double pv0) {
   k.p = z;
   k.v = 0;
@@ -89,7 +84,6 @@ void kf_init(KalmanAxis& k, double z, double r, double pv0) {
   k.vv = pv0;
 }
 
-// x = A x, P = A P A^T + Q, with A = [1 1; 0 1].
 void kf_predict(KalmanAxis& k, double qa) {
   k.p += k.v;
   k.pp += 2 * k.pv + k.vv + qa / 4;
@@ -97,14 +91,13 @@ void kf_predict(KalmanAxis& k, double qa) {
   k.vv += qa;
 }
 
-// H = [1 0]: S = pp + r, K = [pp pv] / S, x += K (z - p), P -= K H P.
 void kf_correct(KalmanAxis& k, double z, double r) {
   const double s = k.pp + r;
   const double k0 = k.pp / s, k1 = k.pv / s;
   const double y = z - k.p;
   k.p += k0 * y;
   k.v += k1 * y;
-  k.vv -= k1 * k.pv;  // before pv/pp change: both read the prior
+  k.vv -= k1 * k.pv;  // must come before pv and pp change
   k.pv -= k0 * k.pv;
   k.pp -= k0 * k.pp;
 }
@@ -122,7 +115,7 @@ void ContactTracker::process(const std::uint8_t* cells) {
   track(cells);
 }
 
-// Per-cell Schmitt trigger: enter below gate_lo, release at gate.
+// A cell turns on below gate_lo and off again at gate.
 void ContactTracker::threshold(const std::uint8_t* cells) {
   const int n = cfg_.rows * cfg_.cols;
   for (int i = 0; i < n; ++i) {
@@ -131,28 +124,20 @@ void ContactTracker::threshold(const std::uint8_t* cells) {
   }
 }
 
-// Seeded region growing. Seeds are 4-connected components of ON cells at or
-// below core_join that contain a core cell (<= spawn_gate), so cores joined
-// by a shallow saddle are one seed. Seeds grow through ON cells by
-// 4-connected multi-source BFS, so touches sharing one ON region stay
-// separate, and only downhill: into cells no stronger than the cell they grow
-// from. A finger's signal falls away from its core, so a rise means another
-// finger's cells. Growing over it would pull this contact towards a
-// neighbour whose core has faded (a lifting finger), which the host sees as
-// a jump at the end of a gesture. ON regions with no core are dropped.
+// Contacts grow from their cores through on cells, and only downhill: a rise
+// means another finger, and growing into it would drag this contact towards
+// a neighbour that is lifting.
 void ContactTracker::segment(const std::uint8_t* cells) {
   blobs_.clear();
   const int R = cfg_.rows, C = cfg_.cols, N = R * C;
   const cv::Mat onMap(R, C, CV_8UC1, on_.data());
   const cv::Mat cellsMap(R, C, CV_8UC1, const_cast<std::uint8_t*>(cells));
 
-  // ON regions, labelled 1..n, with their areas and bounding boxes.
   cv::Mat regionLab, regionStats, regionCentroids;
   const int nRegion = cv::connectedComponentsWithStats(onMap, regionLab, regionStats,
                                                       regionCentroids, 4, CV_32S) - 1;
   const int* regionp = regionLab.ptr<int>(0);
 
-  // Seeds, relabelled 1..nCore in scan order.
   cv::Mat lab;
   const cv::Mat joinMap = onMap & (cellsMap <= cfg_.core_join);
   const int nJoin = cv::connectedComponents(joinMap, lab, 4, CV_32S) - 1;
@@ -165,7 +150,6 @@ void ContactTracker::segment(const std::uint8_t* cells) {
     if (remap[std::size_t(l)]) remap[std::size_t(l)] = ++nCore;
   for (int i = 0; i < N; ++i) labp[i] = remap[std::size_t(labp[i])];
 
-  // Grow seeds through ON cells. Each cell is enqueued at most once.
   {
     std::vector<int> q;
     q.reserve(std::size_t(N));
@@ -185,8 +169,7 @@ void ContactTracker::segment(const std::uint8_t* cells) {
     }
   }
 
-  // One pass: weighted raw moments, cell count and min value per blob.
-  // Weight = depth below baseline, floored at 1.
+  // A cell weighs its depth below baseline, at least 1.
   struct Acc {
     double m00 = 0, m10 = 0, m01 = 0, m20 = 0, m02 = 0, m11 = 0;
     int n = 0;
@@ -212,7 +195,6 @@ void ContactTracker::segment(const std::uint8_t* cells) {
     a.region = regionp[i] - 1;
   }
 
-  // Centroid and equivalent ellipse from the second central moments.
   blobs_.reserve(acc.size());
   for (const Acc& a : acc) {
     if (a.m00 == 0) continue;
@@ -246,14 +228,13 @@ void ContactTracker::segment(const std::uint8_t* cells) {
   classify_regions(regionStats, nRegion);
 }
 
-// Region sizes, core counts and the palm decision; each blob inherits its
-// region's decision.
+// Every blob in a palm region is a palm.
 void ContactTracker::classify_regions(const cv::Mat& stats, int count) {
   const double cell_mm2 = (cfg_.him_w / 100.0 / cfg_.cols) * (cfg_.him_h / 100.0 / cfg_.rows);
   regions_.assign(std::size_t(count), Region{});
   for (int k = 0; k < count; ++k) {
     Region& g = regions_[std::size_t(k)];
-    g.cells = stats.at<int>(k + 1, cv::CC_STAT_AREA);  // label 0 is the background
+    g.cells = stats.at<int>(k + 1, cv::CC_STAT_AREA);
     g.width = stats.at<int>(k + 1, cv::CC_STAT_WIDTH);
     g.height = stats.at<int>(k + 1, cv::CC_STAT_HEIGHT);
     g.area_mm2 = g.cells * cell_mm2;
@@ -265,10 +246,8 @@ void ContactTracker::classify_regions(const cv::Mat& stats, int count) {
   for (Blob& b : blobs_) b.palm = regions_[std::size_t(b.region)].palm;
 }
 
-// A coasting track has lifted when the strongest cell in the 3x3 under both
-// its last matched position and its predicted position is weaker than
-// lift_edge, halfway between the core edge (spawn_gate) and the ON-entry edge
-// (gate_lo).
+// An unmatched track has lifted when the cells around it are weaker than
+// halfway between spawn_gate and gate_lo.
 bool ContactTracker::lifted(const Track& tr, const std::uint8_t* cells) const {
   const double sx = double(cfg_.him_w) / cfg_.cols;
   const double sy = double(cfg_.him_h) / cfg_.rows;
@@ -285,10 +264,8 @@ bool ContactTracker::lifted(const Track& tr, const std::uint8_t* cells) const {
   return std::min(strongest(tr.x, tr.y), strongest(tr.kx.p, tr.ky.p)) > lift_edge;
 }
 
-// Optimal (Hungarian) association of Kalman-predicted tracks to blobs.
-// Unmatched tracks coast and retire after kDropFrames misses, or at once
-// when lifted. Unmatched blobs spawn new tracks. A retired track's wire id is
-// freed only after spawning, so it is never reused in the same frame.
+// A retired track's id is freed only after new tracks spawn, so it is never
+// reused in the same frame.
 void ContactTracker::track(const std::uint8_t* cells) {
   retired_.clear();
 
@@ -299,7 +276,7 @@ void ContactTracker::track(const std::uint8_t* cells) {
   const double r = sq(kMeasStdCells * pitch);
   const double pv0 = sq(kInitVelStdCells * pitch);
 
-  // Blob positions in himetric, cell centres at index + 0.5.
+  // Cell centres sit at index + 0.5.
   struct Pos { double x, y; };
   std::vector<Pos> pos;
   pos.reserve(blobs_.size());
@@ -312,9 +289,6 @@ void ContactTracker::track(const std::uint8_t* cells) {
     kf_predict(tr.ky, qa);
   }
 
-  // Cost = squared distance to the prediction; gated-out pairs get kForbid.
-  // The gate uses the innovation covariance S = P_xy + R, diagonal because
-  // the axes are independent.
   const int nT = int(tracks_.size()), nB = int(pos.size());
   std::vector<double> cost(std::size_t(nT) * nB, kForbid);
   for (int t = 0; t < nT; ++t) {
@@ -339,7 +313,6 @@ void ContactTracker::track(const std::uint8_t* cells) {
     if (i >= 0 && cost[std::size_t(t) * nB + i] < kForbid) {
       kf_correct(tr.kx, pos[std::size_t(i)].x, r);
       kf_correct(tr.ky, pos[std::size_t(i)].y, r);
-      // Position updates only on a match; a coasting track holds still.
       tr.x = tr.kx.p;
       tr.y = tr.ky.p;
       tr.miss = 0;
@@ -348,7 +321,6 @@ void ContactTracker::track(const std::uint8_t* cells) {
     } else if (++tr.miss >= kDropFrames || lifted(tr, cells)) {
       tr.alive = false;
     }
-    // Corrected velocity on a match, the predicted prior while coasting.
     tr.vx = tr.kx.v;
     tr.vy = tr.ky.v;
   }
@@ -382,7 +354,6 @@ void ContactTracker::mark_all_palm() {
   for (Track& tr : tracks_) tr.palm = true;
 }
 
-// Smallest free id at spawn, released at retirement.
 int ContactTracker::alloc_wire() {
   for (int w = 0; w < wire_ids_; ++w)
     if (wire_free_ & (1u << w)) {
