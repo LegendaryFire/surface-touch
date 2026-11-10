@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 # surface-touch userspace processors — heatd (touchpad) and digid (digitizer).
 #
 # heatd reads the pad's vendor heat-container stream from the intel_quickspi
@@ -28,43 +29,32 @@ OPENCV_CFLAGS := $(if $(OPENCV_PC),$(shell pkg-config --cflags $(OPENCV_PC) 2>/d
 CPPFLAGS  += $(OPENCV_CFLAGS)
 OPENCV_LIBS := -lopencv_core -lopencv_imgproc -lopencv_geometry
 
-SRC_DIR  := src
 BUILD    := build
 
-DAEMON_SRC := $(wildcard $(SRC_DIR)/*.cpp)
-OBJ        := $(patsubst $(SRC_DIR)/%.cpp,$(BUILD)/%.o,$(DAEMON_SRC))
+# Each binary names its sources; touch_tracker is shared by both.
+HEATD_SRC    := heatd.cpp heat_engine.cpp touch_tracker.cpp
+DIGID_SRC    := digid.cpp digi_pipeline.cpp pen_position.cpp touch_tracker.cpp
 
-DIGI_SRC   := $(wildcard $(SRC_DIR)/digi/*.cpp)
-DIGI_OBJ   := $(patsubst $(SRC_DIR)/digi/%.cpp,$(BUILD)/digi/%.o,$(DIGI_SRC))
+HEATD_OBJ    := $(HEATD_SRC:%.cpp=$(BUILD)/%.o)
+DIGIPROC_OBJ := $(DIGID_SRC:%.cpp=$(BUILD)/%.o)
 
 all: heatd digid
 
-$(BUILD)/%.o: $(SRC_DIR)/%.cpp | $(BUILD)
-	$(CXX) $(CXXFLAGS) $(CPPFLAGS) -c $< -o $@
+# -MMD -MP writes a .d file beside each object listing the headers it
+# included, so an edited header always rebuilds the objects that use it.
+$(BUILD)/%.o: %.cpp | $(BUILD)
+	$(CXX) $(CXXFLAGS) $(CPPFLAGS) -MMD -MP -c $< -o $@
 
-$(BUILD)/digi/%.o: $(SRC_DIR)/digi/%.cpp | $(BUILD)
-	@mkdir -p $(BUILD)/digi
-	$(CXX) $(CXXFLAGS) $(CPPFLAGS) -c $< -o $@
+-include $(wildcard $(BUILD)/*.d)
 
 # The pad front's descriptor is the committed fixture, embedded at compile
 # time (include/ptp_collection.hpp).
-$(BUILD)/main.o: include/ptp_collection.hpp fixtures/ptp_collection_000D_0005.bin
+$(BUILD)/heatd.o: include/ptp_collection.hpp fixtures/ptp_collection_000D_0005.bin
 
-heatd: $(OBJ)
+heatd: $(HEATD_OBJ)
 	$(CXX) $(CXXFLAGS) $^ -o $@ $(OPENCV_LIBS)
 
-# Every header src/digi/*.cpp includes is listed: an edited header must
-# never leave digid on a pre-edit object.
-DIGI_DEPS := include/digi_frame.hpp include/digi_pipeline.hpp \
-             include/digi_uhid.hpp include/pen_frame.hpp include/pen_feed.hpp \
-             include/pen_uhid.hpp include/pen_pressure.hpp \
-             include/pen_position.hpp \
-             include/touch_tracker.hpp
-$(BUILD)/digi/digid.o: $(DIGI_DEPS)
-$(BUILD)/digi/digi_pipeline.o: $(DIGI_DEPS)
-$(BUILD)/digi/pen_position.o: $(DIGI_DEPS)
-
-digid: $(DIGI_OBJ) $(BUILD)/touch_tracker.o | identity
+digid: $(DIGIPROC_OBJ) | identity
 	$(CXX) $(CXXFLAGS) $^ -o $@ $(OPENCV_LIBS)
 
 # heatd's engine sources are byte-pinned against the hardware-validated

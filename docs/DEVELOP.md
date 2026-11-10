@@ -26,7 +26,7 @@ PKGBUILD       Arch packaging; surface-touch.install carries the DKMS hooks.
   touch controllers across suspend and the driver's `reset_on_resume` path
   resets them; the HID devices and hidraw nodes stay. A reset pad comes back
   out of the heat stream, so `heatd` re-selects it (`StreamGuard` in
-  `src/src/main.cpp`: on a detected suspend, or on a report that is not a
+  `src/heatd.cpp`: on a detected suspend, or on a report that is not a
   heat frame).
 * **Arming is per open.** The heat-stream mode (pad, feature `0x05`) and the
   digitiser stream mode (feature `0x05` `[05 01]`) are claimed on every

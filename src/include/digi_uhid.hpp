@@ -9,7 +9,7 @@
 //   * Geometry: this device's 0x06 response — himW 30348 x himH 20232 in
 //     0.01 mm; the front's logical axes are that domain 1:1, with no scale
 //     factor.
-// The pad's PTP front (src/main.cpp) works the same way: same uhid CREATE2
+// The pad's PTP front (src/heatd.cpp) works the same way: same uhid CREATE2
 // shape, same GET_REPORT servicing, same release packing, same
 // feature-derived report sizing via descwalk.hpp.
 #pragma once
