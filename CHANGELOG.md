@@ -23,6 +23,13 @@
   `heatd` kept reading the same node without selecting the stream again.
   `heatd` now re-selects the heat stream once per detected suspend, and on a
   report that is not a heat frame (a device-initiated reset).
+- The touchscreen and pen could fall back to single-touch after waking from
+  suspend. The digitizer is reset on resume too, and does not always keep
+  its stream mode; `digid` never selected it again, so touches went to
+  the digitizer's native one-contact touchscreen instead. `digid` now
+  re-arms the stream the same way `heatd` does (the two share the guard).
+- `digid`'s log lines reach the journal as they are written, not all at
+  once when the service stops.
 
 ### Removed
 - The developer modes of `heatd` (`--replay`, `--uhid-replay`, `--script`,

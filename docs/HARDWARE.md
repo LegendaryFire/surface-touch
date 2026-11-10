@@ -58,11 +58,11 @@ mode.
 
 Consequences built into this package:
 
-* `heatd` re-selects the heat stream after a resume, and whenever a report
-  arrives that is not a heat frame (a device-initiated reset), on the node
-  it already has open.
-* The digitizer keeps its stream mode across the resume reset;
-  `digid` has no re-arm of its own.
+* `heatd` and `digid` re-select their stream after a resume, and
+  whenever a report arrives that only the default mode sends (a
+  device-initiated reset), on the node they already have open. For the
+  digitizer those are its native single-contact Touch Screen report (`0x40`,
+  6 bytes) and its Pen report (`0x01`).
 * **Never** open a hard-coded `/dev/hidrawN`: the numbers are assigned at
   enumeration and differ between boots. Use `/dev/surface-thc-pad` /
   `/dev/surface-thc-digitizer`.

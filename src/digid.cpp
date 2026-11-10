@@ -29,6 +29,7 @@
 #include "digi_uhid.hpp"
 #include "hidraw_node.hpp"
 #include "pen_feed.hpp"
+#include "stream_guard.hpp"
 #include "uhid_device.hpp"
 
 namespace {
@@ -76,6 +77,13 @@ inline bool is_pen_frame(std::uint8_t id) {
   return id == 0x07 || id == 0x0B || id == 0x0C || id == 0x0D;
 }
 
+// Reports only the default mode sends: the digitizer's own single-contact
+// Touch Screen (0x40) and Pen (0x01) collections. Seeing one means the
+// controller has reset out of the stream.
+inline bool is_default_mode_report(std::uint8_t id) {
+  return id == 0x40 || id == 0x01;
+}
+
 // Pen-in-range touch suppression: while the pen is in range, and for a short
 // hold after it leaves, every touch is a palm - the writing hand resting on
 // the screen. The pen may report its last in-range frame and then fall
@@ -99,7 +107,8 @@ class PenProximity {
 // The mode belongs to this open, so this process reverts it at teardown.
 // GET 0x05 readbacks are logged only; nothing branches on them. The first
 // 0x1A container is the signal that the arm took effect. A failed feature
-// write is never retried.
+// write is never retried. A reset controller is re-armed on the same open
+// (stream_guard.hpp).
 inline constexpr std::uint8_t kArmReport = 0x05;  // the only feature id sent
 inline constexpr hidraw::Identity kDigitizer{0x045E, 0x0C5D};
 
@@ -209,7 +218,12 @@ int live(const char* node, bool verbose, const char* record_path) {
   std::uint8_t buf[8192];  // larger than every declared report (max 7488 B)
   long sent = 0, pen_frames = 0, pen_sent = 0;
   bool first_frame_logged = false;
+  stream::Guard guard("digid", [&] {
+    first_frame_logged = false;  // log the commit of this arm too
+    return feature_set(fd, 1, "re-arm") == 0;
+  });
   while (!g_stop) {
+    guard.on_tick();
     const ssize_t n = ::read(fd, buf, sizeof(buf));
     if (n > 0) {
       ++st.records;
@@ -260,6 +274,8 @@ int live(const char* node, bool verbose, const char* record_path) {
                         pfeed.report.x, pfeed.report.y, pfeed.report.scan_time,
                         pen_sent);
         }
+      } else if (is_default_mode_report(buf[0])) {
+        guard.on_default_report(n);
       }
     } else if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
       std::fprintf(stderr, "digid: hidraw read: %s\n", std::strerror(errno));
@@ -331,6 +347,9 @@ int main(int argc, char** argv) {
     usage(stderr);
     return 2;
   }
+  // Line-buffered even into a pipe, so the journal gets each line as it is
+  // written rather than all of them at exit.
+  std::setvbuf(stdout, nullptr, _IOLBF, 0);
   std::signal(SIGINT, on_sigint);
   std::signal(SIGTERM, on_sigint);
   // SIGHUP too: the teardown revert is the only thing that releases the arm.

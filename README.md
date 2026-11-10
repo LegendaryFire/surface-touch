@@ -117,10 +117,8 @@ suspend, so on resume the driver **resets them**. The HID devices and their
 `/dev/hidrawN` nodes stay, but a reset controller comes back in its default
 report mode:
 
-* `heatd` notices the resume (or the first report outside the heat stream)
-  and selects the heat stream again on the same open node;
-* the digitizer keeps its stream mode across the reset, so `digid`
-  carries on without a re-arm;
+* `heatd` and `digid` notice the resume (or the first report from the
+  default mode) and select their stream again on the same open node;
 * if a node does go away, its service stops with it and starts again when
   the node returns, arming the port on the fresh open. The udev rules find
   the nodes by the devices' own HID identity (`045e:0c46`, `045e:0c5d`) and

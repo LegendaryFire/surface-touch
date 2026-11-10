@@ -37,6 +37,7 @@
 #include "hidraw_node.hpp"
 #include "ptp_collection.hpp"
 #include "ptp_pack.hpp"
+#include "stream_guard.hpp"
 #include "uhid_device.hpp"
 
 namespace {
@@ -244,49 +245,6 @@ bool enable_heat_stream(int hdev) {
   return true;
 }
 
-// Time the system has spent suspended: CLOCK_BOOTTIME advances across
-// suspend, CLOCK_MONOTONIC does not.
-std::int64_t suspended_ns() {
-  timespec b{}, m{};
-  clock_gettime(CLOCK_BOOTTIME, &b);
-  clock_gettime(CLOCK_MONOTONIC, &m);
-  return (std::int64_t(b.tv_sec) - m.tv_sec) * 1000000000 + (b.tv_nsec - m.tv_nsec);
-}
-
-// Re-applies the stream mode after the device resets. A reset (the driver's
-// resume reset, or one the device initiates) returns the pad to boot-mouse
-// reports.
-// Triggers: a suspend observed between loop passes, or a report shorter
-// than a heat frame. At most one arm per trigger; a failed arm blocks the
-// in-band trigger until the next resume.
-struct StreamGuard {
-  int hdev;
-  std::int64_t slept = suspended_ns();
-  Clock::time_point last_arm = Clock::now();
-  bool blocked = false;
-
-  void on_tick() {
-    const std::int64_t s = suspended_ns();
-    if (s - slept < 1000000000) return;
-    std::fprintf(stderr, "heatd: resume after %.1f s suspended; re-arming stream\n",
-                 double(s - slept) / 1e9);
-    slept = s;
-    arm();
-  }
-  void on_short_report(ssize_t len) {
-    if (blocked || Clock::now() - last_arm < 1s) return;
-    std::fprintf(stderr, "heatd: %zd-byte report outside the heat stream (device "
-                         "reset); re-arming stream\n", len);
-    arm();
-  }
-  void arm() {
-    last_arm = Clock::now();
-    blocked = !enable_heat_stream(hdev);
-    if (blocked)
-      std::fprintf(stderr, "heatd: re-arm failed; restart heatd to recover\n");
-  }
-};
-
 // "pci-<function>/heatd": the front's phys names the PCI function it serves.
 std::string phys_for(const char* hidraw) {
   const std::string function = hidraw::pci_function(hidraw);
@@ -310,7 +268,8 @@ int run_live(const Options& opt, const Front& f) {
   }
   print_config(cfg, cfg_src);
   enable_heat_stream(hdev);
-  StreamGuard guard{hdev};
+  // A reset pad sends boot-mouse reports, all shorter than a heat frame.
+  stream::Guard guard("heatd", [hdev] { return enable_heat_stream(hdev); });
 
   uhid::Device uhid;
   if (!uhid.open(front_spec(opt, f), phys_for(opt.hidraw))) {
@@ -366,7 +325,7 @@ int run_live(const Options& opt, const Front& f) {
     }
     if (static_cast<std::size_t>(got) < heat::kFrameSize) {
       ++p.count.short_reads;
-      guard.on_short_report(got);
+      guard.on_default_report(got);
       continue;
     }
     const auto contacts = p.step(buf, static_cast<std::size_t>(got));

@@ -24,10 +24,12 @@ PKGBUILD       Arch packaging; surface-touch.install carries the DKMS hooks.
   those names. Any new rule you write must key on identity too.
 * **Resume resets the controllers, not the nodes.** The firmware drops the
   touch controllers across suspend and the driver's `reset_on_resume` path
-  resets them; the HID devices and hidraw nodes stay. A reset pad comes back
-  out of the heat stream, so `heatd` re-selects it (`StreamGuard` in
-  `src/heatd.cpp`: on a detected suspend, or on a report that is not a
-  heat frame).
+  resets them; the HID devices and hidraw nodes stay. A reset controller
+  comes back out of its stream, so both processors re-arm it on the node
+  they already have open (`stream::Guard` in
+  `src/include/stream_guard.hpp`): on a detected suspend, or on a report
+  only the default mode sends (for the pad, anything shorter than a heat
+  frame; for the digitizer, its native touch `0x40` or pen `0x01`).
 * **Arming is per open.** The heat-stream mode (pad, feature `0x05`) and the
   digitiser stream mode (feature `0x05` `[05 01]`) are claimed on every
   device open and never inherited across opens; `digid` reverts with
