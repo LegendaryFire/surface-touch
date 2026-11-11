@@ -1,34 +1,48 @@
 # surface-touch
 
-Touchpad, touchscreen and pen support for the Surface Laptop Studio 2 on
-Linux.
-
-The touch hardware sits on two Intel THC SPI ports that the stock
+Touchpad, touchscreen and pen drivers for the Surface Laptop Studio 2 on
+Linux. The touchpad is handled by its own daemon, `heatd`, and the
+touchscreen and pen by `digid`. The touch hardware sits on two Intel THC SPI ports that the stock
 `intel_quickspi` driver doesn't bind, and once bound it sends data nothing
-in the kernel decodes. This repo has three parts:
+in the kernel decodes.
 
-- `module/`: the THC driver with support for this machine, built by DKMS.
-- `heatd`: turns the touchpad's raw data into a standard touchpad.
-- `digid`: does the same for the touchscreen and pen.
+| Component | Type             | Description                                                        |
+| --------- | ---------------- | ------------------------------------------------------------------- |
+| `module/` | Kernel driver    | Adds this machine's two THC SPI ports to `intel_quickspi`; built by DKMS. |
+| `heatd`   | Userspace daemon | Turns the touchpad's raw data into a standard touchpad.              |
+| `digid`   | Userspace daemon | Does the same for the touchscreen and pen.                           |
 
-Gestures, scrolling and the rest come from the normal Linux stack:
-hid-multitouch, libinput and your desktop.
+Each daemon takes its device's raw frames off a hidraw node and replays
+them as ordinary HID reports through uhid; hid-multitouch (touchpad and
+touchscreen) and hid-input (pen) turn those into standard input devices,
+so gestures, scrolling and the rest come from libinput and your desktop.
 
-## Status
-
-Touchpad, multi-touch touchscreen, pen position and pressure all work, and
-survive suspend. Not supported: pen buttons, eraser and tilt (the hardware
-doesn't send them), and wake on touch.
-
-Only tested on the Surface Laptop Studio 2.
+```mermaid
+flowchart LR
+    TPAD([Touchpad]) --> QS
+    TSCR(["Touchscreen & Pen"]) --> QS
+    QS[intel_quickspi] --> PADN
+    QS --> DIGN
+    PADN["/dev/surface-thc-pad"] --> HEATD[heatd]
+    DIGN["/dev/surface-thc-digitizer"] --> DIGID[digid]
+    HEATD --> F1["pad front<br>Surface Heat Processor"]
+    DIGID --> F2["touch front<br>Surface Digitizer Touch"]
+    DIGID --> F3["pen front<br>Surface Digitizer Pen"]
+    F1 --> MT1[hid-multitouch]
+    F2 --> MT2[hid-multitouch]
+    F3 --> HI[hid-input]
+    MT1 --> EV[evdev]
+    MT2 --> EV
+    HI --> EV
+    EV --> LIB[libinput]
+```
 
 ## Requirements
 
-- Linux 7.2 or 7.3 with matching kernel headers
-- dkms, make, GCC 15 or newer, OpenCV 5 (`pacman -S dkms opencv` on Arch)
-- Secure Boot off, or sign the module with your own key; it's unsigned
-
-Remove `iptsd` if you have it. This package blocks `ithc` from the ports.
+- **Kernel:** Linux 7.2 or 7.3, with its matching headers.
+- **To build:** `dkms`, `make`, GCC 15+, OpenCV 5 — on Arch: `pacman -S dkms opencv`.
+- **Secure Boot:** off, unless you sign the module yourself — it ships unsigned.
+- **Conflicts:** remove `iptsd` if you have it; this package keeps `ithc` off the ports.
 
 ## Install
 
@@ -62,54 +76,22 @@ To remove: `sudo make uninstall` (or `pacman -R surface-touch`), then reboot.
 
 ## When something's wrong
 
-- Touch stopped working: `systemctl restart surface-heatd surface-digid`.
-- Ports not bound to `intel_quickspi`: the module didn't build for your
-  kernel. Install the matching headers and run `sudo dkms autoinstall`.
-  `Required key not available` in dmesg means Secure Boot.
-- `ithc` bound instead: `/etc/modprobe.d/surface-touch.conf` is missing.
-  Reinstall and reboot.
-- Touchpad frozen with `-110` timeouts in dmesg: the controller is wedged.
-  Reboot.
+| Symptom                                     | Fix                                                                                     |
+| ------------------------------------------- | ---------------------------------------------------------------------------------------- |
+| Touch stopped working                       | `systemctl restart surface-heatd surface-digid`                                          |
+| Ports not bound to `intel_quickspi`         | Install the matching kernel headers, then `sudo dkms autoinstall`. `Required key not available` in dmesg means Secure Boot. |
+| `ithc` bound to the ports instead           | `/etc/modprobe.d/surface-touch.conf` is missing; reinstall and reboot.                   |
+| Touchpad frozen, `-110` timeouts in dmesg   | The controller is wedged; reboot.                                                        |
 
 When reporting a problem, include `uname -a`, `lspci -nnk -s 00:10.` and
 `journalctl -b -u surface-heatd -u surface-digid`.
 
 ## Known issues
 
-- Very light pen strokes may not draw. libinput needs 5% pressure before
-  the pen counts as touching.
 - Pen curves can look slightly angular: the hardware only reports the pen
   at 66 Hz.
 - The kernel's own touchpad, touchscreen and stylus devices stay listed but
   do nothing while the services run.
-
-## Development
-
-```
-module/        the THC driver (DKMS)
-src/           heatd and digid
-tools/         heatview, a live view of the touchpad heat map
-udev/          names the devices and starts the services
-systemd/       the two services
-modprobe.d/    keeps ithc off the ports
-```
-
-`make tools` builds `tools/heatview/surface-heatview`. It needs SDL3 and read
-access to the pad (`sudo setfacl -m u:$USER:r /dev/surface-thc-pad`), and
-shows the heat map with what heatd makes of it. `--record FILE` saves the
-frames.
-
-Commits that passed a real session on the machine are tagged
-`hw-validated-<date>`. To see what hasn't been tested on hardware yet:
-
-```
-git diff $(git describe --tags --match 'hw-validated-*' --abbrev=0) -- src/
-```
-
-To release: bump `VERSION`, `PACKAGE_VERSION` in `module/dkms.conf` and
-`pkgver` in the PKGBUILD. Test touchpad, touchscreen, pen and a
-suspend/resume on the machine, tag the commit, then `make dist` and put the
-tarball's checksum in the PKGBUILD.
 
 ## License
 
